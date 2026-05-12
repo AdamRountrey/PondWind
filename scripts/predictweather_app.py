@@ -64,11 +64,11 @@ def _run_report_worker(argv: list[str]) -> int:
     except Exception:
         pass
 
-    if len(argv) != 9:
+    if len(argv) != 10:
         _emit_worker_event("error", message="Worker received invalid arguments.")
         return 2
 
-    race_time, center_lat, center_lon, side_meters, site_label, mesh_resolution, report_output_dir, allow_insecure_ssl, force_ecostress_sst = argv
+    race_time, center_lat, center_lon, side_meters, site_label, mesh_resolution, wind_solver, report_output_dir, allow_insecure_ssl, force_ecostress_sst = argv
     _emit_worker_event("progress", percent=1, message="Initializing report engine...")
     try:
         from run_barton_weekly_report import build_weekly_report
@@ -84,6 +84,7 @@ def _run_report_worker(argv: list[str]) -> int:
             side_meters=float(side_meters),
             site_label=site_label,
             mesh_resolution=float(mesh_resolution),
+            wind_solver=wind_solver,
             report_output_dir=(report_output_dir or None),
             allow_insecure_ssl=(allow_insecure_ssl == "1"),
             force_ecostress_sst=(force_ecostress_sst == "1"),

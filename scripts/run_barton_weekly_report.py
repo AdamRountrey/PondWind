@@ -42,6 +42,7 @@ from predictweather.landscape import LandscapeBuildOptions, build_landscape_geot
 from predictweather.nam import download_nam_for_valid_time, sample_nam_point_forecast
 from predictweather.nws import sample_nws_hourly_forecast
 from predictweather.observations import nearest_station_candidates, recent_same_local_hour_observations
+from predictweather.openfoam import run_openfoam_domain_average
 from predictweather.satellite import (
     PLANETARY_COMPUTER_STAC,
     count_ecostress_water_pixels,
@@ -105,6 +106,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--side-meters", type=float, default=SiteConfig.side_meters, help="Square side length in meters. Default is 1 square mile.")
     parser.add_argument("--site-label", default=SiteConfig.label, help="Short label used in report titles and output folder names.")
     parser.add_argument("--mesh-resolution", type=float, default=30.0)
+    parser.add_argument("--wind-solver", choices=("windninja", "openfoam"), default="windninja", help="Terrain wind solver. OpenFOAM is experimental and requires PONDWIND_OPENFOAM_RUNNER.")
     parser.add_argument("--solve-buffer-m", type=float, default=SiteConfig.solve_buffer_m, help="Extra buffer around the final area for WindNinja solves.")
     parser.add_argument("--report-output-dir", default=None, help="Optional directory where the report folder should be created. Defaults to outputs/reports.")
     parser.add_argument("--allow-insecure-ssl", action="store_true")
@@ -829,8 +831,12 @@ def _build_wind_products(
     domain: PreparedSiteDomain,
     wind_input_tif: Path,
     mesh_resolution_m: float,
+    wind_solver: str = "windninja",
     progress_callback: Callable[[int, str], None] | None = None,
 ) -> dict:
+    if wind_solver not in {"windninja", "openfoam"}:
+        raise ValueError(f"Unsupported wind solver: {wind_solver}")
+
     _progress(progress_callback, 20, "Building wind boundary conditions...")
     boundary_target_time_utc = _aligned_boundary_valid_time(race_time_utc)
     model_forecasts, model_errors = _load_model_point_forecasts(site.center_lat, site.center_lon, boundary_target_time_utc)
@@ -874,21 +880,40 @@ def _build_wind_products(
 
     wind_root = temp_dir / "wind"
     wind_root.mkdir(parents=True, exist_ok=True)
-    cli_path = windninja_cli_path(RUNTIME_RESOURCE_ROOT)
     deterministic_dir = wind_root / "deterministic"
-    _progress(progress_callback, 32, "Running terrain wind prediction...")
-    run_windninja_domain_average(
-        cli_path=cli_path,
-        elevation_tif=wind_input_tif,
+    solver_metadata: list[dict] = []
+
+    def run_solver(output_dir: Path, wind_speed_mps: float, wind_direction_deg: float) -> dict:
+        if wind_solver == "openfoam":
+            return run_openfoam_domain_average(
+                elevation_tif=wind_input_tif,
+                output_dir=output_dir,
+                wind_speed_mps=wind_speed_mps,
+                wind_direction_deg=wind_direction_deg,
+                mesh_resolution_m=mesh_resolution_m,
+            )
+        cli_path = windninja_cli_path(RUNTIME_RESOURCE_ROOT)
+        return run_windninja_domain_average(
+            cli_path=cli_path,
+            elevation_tif=wind_input_tif,
+            output_dir=output_dir,
+            wind_speed_mps=wind_speed_mps,
+            wind_direction_deg=wind_direction_deg,
+            mesh_resolution_m=mesh_resolution_m,
+            momentum=True,
+            iterations=300,
+            turbulence_output=False,
+            num_threads=1,
+        )
+
+    solver_display = "OpenFOAM experimental" if wind_solver == "openfoam" else "WindNinja momentum"
+    _progress(progress_callback, 32, f"Running terrain wind prediction with {solver_display}...")
+    deterministic_run = run_solver(
         output_dir=deterministic_dir,
         wind_speed_mps=float(boundary["wind_speed_mps"]),
         wind_direction_deg=float(boundary["wind_from_direction_deg"]),
-        mesh_resolution_m=mesh_resolution_m,
-        momentum=True,
-        iterations=300,
-        turbulence_output=False,
-        num_threads=1,
     )
+    solver_metadata.append({"role": "deterministic", **deterministic_run})
     ascii_paths = expected_windninja_ascii_paths(
         elevation_tif=wind_input_tif,
         wind_speed_mps=float(boundary["wind_speed_mps"]),
@@ -967,7 +992,7 @@ def _build_wind_products(
 
     ensemble_dir = wind_root / "gefs_sigma"
     ensemble_dir.mkdir(parents=True, exist_ok=True)
-    _progress(progress_callback, 45, "Estimating wind variability...")
+    _progress(progress_callback, 45, f"Estimating wind variability with {solver_display}...")
     speed_members: list[np.ndarray] = []
     direction_members_deg: list[np.ndarray] = []
     speed_header: dict[str, float] | None = None
@@ -977,18 +1002,12 @@ def _build_wind_products(
         member_v = float(sampled_gefs["mean_v10_mps"]) + sigma_v * float(sampled_gefs["spread_v10_mps"])
         member_speed_mps, member_direction_deg = _uv_to_speed_dir(member_u, member_v)
         member_dir = ensemble_dir / f"member_{index:02d}"
-        run_windninja_domain_average(
-            cli_path=cli_path,
-            elevation_tif=wind_input_tif,
+        member_run = run_solver(
             output_dir=member_dir,
             wind_speed_mps=member_speed_mps,
             wind_direction_deg=member_direction_deg,
-            mesh_resolution_m=mesh_resolution_m,
-            momentum=True,
-            iterations=300,
-            turbulence_output=False,
-            num_threads=1,
         )
+        solver_metadata.append({"role": f"member_{index:02d}", **member_run})
         member_ascii = expected_windninja_ascii_paths(
             elevation_tif=wind_input_tif,
             wind_speed_mps=member_speed_mps,
@@ -1086,6 +1105,9 @@ def _build_wind_products(
         "skill_metadata": skill_metadata,
         "gefs_boundary": sampled_gefs,
         "wind_data_mode": wind_note,
+        "wind_solver": wind_solver,
+        "wind_solver_display": solver_display,
+        "solver_runs": solver_metadata,
         "wind_input_tif": str(wind_input_tif),
         "final_dem_tif": str(domain.clipped_dem_tif),
         "solve_dem_tif": str(domain.solve_dem_tif),
@@ -1339,7 +1361,7 @@ def _write_markdown_report(report_dir: Path, race_time_local: datetime, site: Si
             f"![Latest SST]({_app_path(sst['output_png'])})",
             "",
             "## Notes",
-            "- Wind variance products are single-time GEFS sigma-spread maps downscaled with WindNinja momentum.",
+            f"- Wind variance products are single-time GEFS sigma-spread maps downscaled with `{wind['wind_solver_display']}`.",
             f"- Wind data mode for this run: `{wind['wind_data_mode']}`.",
             "- Chlorophyll-a is an estimated satellite retrieval from Sentinel-2 red/red-edge reflectance, not an in situ measurement.",
             "- Turbidity is an estimated Sentinel-2 red/NIR remote-sensing retrieval, not an in situ measurement.",
@@ -1358,6 +1380,7 @@ def build_weekly_report(
     side_meters: float = SiteConfig.side_meters,
     site_label: str = SiteConfig.label,
     mesh_resolution: float = 30.0,
+    wind_solver: str = "windninja",
     solve_buffer_m: float = SiteConfig.solve_buffer_m,
     report_output_dir: str | Path | None = None,
     allow_insecure_ssl: bool = False,
@@ -1393,7 +1416,7 @@ def build_weekly_report(
         progress_callback=progress_callback,
     )
     landscape_tif, landscape_summary = _prepare_landscape_input(temp_dir, domain, satellite_inputs, progress_callback)
-    wind_summary = _build_wind_products(report_dir, temp_dir, race_time_utc, site, domain, landscape_tif, mesh_resolution, progress_callback)
+    wind_summary = _build_wind_products(report_dir, temp_dir, race_time_utc, site, domain, landscape_tif, mesh_resolution, wind_solver, progress_callback)
     satellite_summary = _build_satellite_products(report_dir, temp_dir, domain, satellite_inputs, progress_callback)
     _progress(progress_callback, 90, "Writing report outputs...")
     report_path = _write_markdown_report(report_dir, race_time_local, site, wind_summary, satellite_summary)
@@ -1460,6 +1483,7 @@ def main() -> None:
         side_meters=args.side_meters,
         site_label=args.site_label,
         mesh_resolution=args.mesh_resolution,
+        wind_solver=args.wind_solver,
         solve_buffer_m=args.solve_buffer_m,
         report_output_dir=args.report_output_dir,
         allow_insecure_ssl=args.allow_insecure_ssl,

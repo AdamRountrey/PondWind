@@ -61,6 +61,7 @@ class PredictWeatherGui:
         self.side_meters_var = StringVar(value="1609.344")
         self.site_label_var = StringVar(value="barton_pond")
         self.mesh_resolution_var = StringVar(value="30")
+        self.wind_solver_var = StringVar(value="windninja")
         self.report_output_dir_var = StringVar(value=str(_runtime_project_root() / "outputs" / "reports"))
         self.allow_insecure_ssl_var = IntVar(value=0)
         self.force_ecostress_sst_var = IntVar(value=0)
@@ -99,7 +100,13 @@ class PredictWeatherGui:
             entry.grid(row=row, column=1, sticky=W, pady=6)
             Label(form, text=hint, anchor="w").grid(row=row, column=2, sticky=W, padx=(10, 0), pady=6)
 
-        output_row = len(fields)
+        solver_row = len(fields)
+        Label(form, text="Wind solver", anchor="w", width=16).grid(row=solver_row, column=0, sticky=W, padx=(0, 8), pady=6)
+        solver_combo = ttk.Combobox(form, textvariable=self.wind_solver_var, values=("windninja", "openfoam"), state="readonly", width=33)
+        solver_combo.grid(row=solver_row, column=1, sticky=W, pady=6)
+        Label(form, text="OpenFOAM is experimental", anchor="w").grid(row=solver_row, column=2, sticky=W, padx=(10, 0), pady=6)
+
+        output_row = solver_row + 1
         Label(form, text="Report folder", anchor="w", width=16).grid(row=output_row, column=0, sticky=W, padx=(0, 8), pady=6)
         output_entry = Entry(form, textvariable=self.report_output_dir_var, width=36)
         output_entry.grid(row=output_row, column=1, sticky=W, pady=6)
@@ -178,6 +185,9 @@ class PredictWeatherGui:
         if not self.site_label_var.get().strip():
             self._show_error("Site label cannot be empty.")
             return None
+        if self.wind_solver_var.get().strip() not in {"windninja", "openfoam"}:
+            self._show_error("Wind solver must be windninja or openfoam.")
+            return None
 
         return [
             self.race_time_var.get().strip(),
@@ -186,6 +196,7 @@ class PredictWeatherGui:
             self.side_meters_var.get().strip(),
             self.site_label_var.get().strip(),
             self.mesh_resolution_var.get().strip(),
+            self.wind_solver_var.get().strip(),
             self.report_output_dir_var.get().strip(),
             str(self.allow_insecure_ssl_var.get()),
             str(self.force_ecostress_sst_var.get()),
@@ -208,7 +219,8 @@ class PredictWeatherGui:
         self._append_log(f"Side meters: {command[3]}\n")
         self._append_log(f"Site label: {command[4]}\n")
         self._append_log(f"Mesh resolution: {command[5]}\n\n")
-        self._append_log(f"Report folder: {command[6]}\n\n")
+        self._append_log(f"Wind solver: {command[6]}\n")
+        self._append_log(f"Report folder: {command[7]}\n\n")
         self.status_var.set("Running report build...")
         self.last_report_path_var.set("")
         self.progress_var.set(0)

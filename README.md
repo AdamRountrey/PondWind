@@ -7,6 +7,7 @@ PondWind builds race-day wind and satellite reports for a user-selected square a
 - User-selected site center and area size
 - Buffered `1 m` USGS 3DEP terrain acquisition
 - WindNinja solve on a larger buffered domain, cropped back to the report area
+- Optional experimental OpenFOAM solver hook for local CFD experiments
 - Deterministic wind boundary from a weighted consensus of:
   - `HRDPS`
   - `HRRR`
@@ -87,6 +88,19 @@ Outputs are written under:
 
 If `--report-output-dir` is provided, the report folder is created there instead.
 
+The default terrain wind solver is WindNinja. To try the experimental OpenFOAM path:
+
+```powershell
+$env:PONDWIND_OPENFOAM_RUNNER = "C:\path\to\run_openfoam_case.ps1"
+python scripts\run_barton_weekly_report.py `
+  --wind-solver openfoam `
+  --race-local-datetime 2026-05-10T14:00:00 `
+  --center-lat 42.31295753946108 `
+  --center-lon -83.75641581917375
+```
+
+The OpenFOAM runner is intentionally not bundled. It must accept the command-line arguments PondWind passes, read `--request-json`, and write at least a wind speed ASCII grid plus a wind direction ASCII grid. The runner can either write the exact paths named in the request JSON, or write `speed.asc` and `direction.asc` into `--output-dir`.
+
 Top-level report deliverables are:
 
 - `weekly_report.md`
@@ -132,7 +146,7 @@ Each model is sampled near the selected site and converted into common `u/v` win
 - penalizes speed and direction outliers relative to the model cluster
 - applies a gentle recent-skill adjustment from nearby surface observations when available
 
-The resulting consensus wind is passed into WindNinja as the deterministic upstream boundary.
+The resulting consensus wind is passed into the selected terrain solver as the deterministic upstream boundary. WindNinja is the stable default; OpenFOAM is available only as an experimental external-runner hook.
 
 ### Wind variability
 
