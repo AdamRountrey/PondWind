@@ -8,6 +8,7 @@ The packaged Windows application redistributes third-party software that keeps i
 
 - `WindNinja`
   - Staged locally for builds/tests under `tools/WindNinjaApp`
+  - Release CI may download and stage the official upstream Windows runtime
   - Upstream project: [firelab/windninja](https://github.com/firelab/windninja)
   - Do not assume the staged WindNinja runtime is covered by this repository's MIT license.
 

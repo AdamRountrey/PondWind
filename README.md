@@ -242,11 +242,14 @@ It will:
 - upload the zip as a workflow artifact
 - attach the zip to GitHub releases for tags that start with `v`
 
-The workflow expects a repository secret:
+By default, the workflow downloads the official WindNinja 3.12.2 Windows ZIP from the USDA Forest Service WindNinja download page, verifies the archive checksum, stages the runtime, and then packages PondWind.
 
-- `WINDNINJA_ARCHIVE_URL`
+Optional repository configuration:
 
-This should point to a vetted WindNinja runtime zip that extracts to `WindNinjaApp\...` or directly to a folder containing `bin\WindNinja_cli.exe`.
+- Secret `WINDNINJA_ARCHIVE_URL`: override the default upstream WindNinja archive URL.
+- Variable `WINDNINJA_ARCHIVE_SHA256`: expected SHA256 for the override archive.
+
+The archive may be either a portable runtime zip that contains `bin\WindNinja_cli.exe` somewhere inside it, or the official WindNinja installer zip. The workflow stages either shape without committing vendor binaries to this repository.
 
 Typical release flow:
 

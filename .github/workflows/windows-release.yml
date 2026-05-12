@@ -14,6 +14,7 @@ jobs:
     runs-on: windows-latest
     env:
       WINDNINJA_ARCHIVE_URL: ${{ secrets.WINDNINJA_ARCHIVE_URL }}
+      WINDNINJA_ARCHIVE_SHA256: ${{ vars.WINDNINJA_ARCHIVE_SHA256 }}
 
     steps:
       - name: Check out repository
@@ -30,27 +31,69 @@ jobs:
       - name: Stage WindNinja runtime
         shell: powershell
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:WINDNINJA_ARCHIVE_URL)) {
-            throw "Missing WINDNINJA_ARCHIVE_URL secret. Point it to a vetted WindNinja runtime zip for CI builds."
+          $officialUrl = "https://research.fs.usda.gov/sites/default/files/2026-03/firelab-windninja-3.12.2-win64.zip"
+          $officialSha256 = "217AADD90FBFF5ADE25EA3C9422B10122E36FAB935B14FCDEA1C64F1C01AEA66"
+          $archiveUrl = $env:WINDNINJA_ARCHIVE_URL
+          $expectedSha256 = $env:WINDNINJA_ARCHIVE_SHA256
+          if ([string]::IsNullOrWhiteSpace($archiveUrl)) {
+            $archiveUrl = $officialUrl
+            if ([string]::IsNullOrWhiteSpace($expectedSha256)) {
+              $expectedSha256 = $officialSha256
+            }
           }
           $archivePath = Join-Path $env:RUNNER_TEMP "WindNinjaApp.zip"
           $extractRoot = Join-Path $env:RUNNER_TEMP "windninja-stage"
-          Invoke-WebRequest -Uri $env:WINDNINJA_ARCHIVE_URL -OutFile $archivePath
-          Expand-Archive -Path $archivePath -DestinationPath $extractRoot -Force
-          $candidateHomes = @(
-            (Join-Path $extractRoot "WindNinjaApp"),
-            $extractRoot
-          )
-          $resolvedHome = $null
-          foreach ($candidate in $candidateHomes) {
-            if (Test-Path (Join-Path $candidate "bin\\WindNinja_cli.exe")) {
-              $resolvedHome = $candidate
-              break
+          $installRoot = Join-Path $env:RUNNER_TEMP "WindNinjaApp"
+          Write-Host "Downloading WindNinja runtime from $archiveUrl"
+          Invoke-WebRequest -Uri $archiveUrl -OutFile $archivePath
+          if (![string]::IsNullOrWhiteSpace($expectedSha256)) {
+            $actualSha256 = (Get-FileHash -Algorithm SHA256 $archivePath).Hash
+            if ($actualSha256 -ne $expectedSha256.ToUpperInvariant()) {
+              throw "WindNinja archive SHA256 mismatch. Expected $expectedSha256 but got $actualSha256."
             }
           }
-          if ($null -eq $resolvedHome) {
-            throw "Could not find bin\\WindNinja_cli.exe after extracting WindNinja runtime archive."
+          Expand-Archive -Path $archivePath -DestinationPath $extractRoot -Force
+
+          function Find-WindNinjaHome {
+            param([string]$SearchRoot)
+            if (!(Test-Path $SearchRoot)) {
+              return $null
+            }
+            $cliPath = Get-ChildItem -Path $SearchRoot -Recurse -Filter "WindNinja_cli.exe" -File |
+              Where-Object { $_.FullName -like "*\bin\WindNinja_cli.exe" } |
+              Select-Object -First 1
+            if ($null -eq $cliPath) {
+              return $null
+            }
+            return (Resolve-Path (Split-Path -Parent (Split-Path -Parent $cliPath.FullName))).Path
           }
+
+          $resolvedHome = Find-WindNinjaHome -SearchRoot $extractRoot
+          if ($null -eq $resolvedHome) {
+            $installer = Get-ChildItem -Path $extractRoot -Recurse -Filter "*.exe" -File | Select-Object -First 1
+            if ($null -ne $installer) {
+              Write-Host "Extracted archive contains installer $($installer.FullName)."
+              $sevenZip = Get-Command 7z -ErrorAction SilentlyContinue
+              if ($null -ne $sevenZip) {
+                Write-Host "Trying to extract installer payload with 7-Zip."
+                & $sevenZip.Source x $installer.FullName "-o$installRoot" -y
+                $resolvedHome = Find-WindNinjaHome -SearchRoot $installRoot
+              }
+              if ($null -eq $resolvedHome) {
+                Write-Host "Running WindNinja installer in silent mode."
+                $process = Start-Process -FilePath $installer.FullName -ArgumentList @("/S", "/D=$installRoot") -Wait -PassThru
+                if ($process.ExitCode -ne 0) {
+                  throw "WindNinja installer exited with code $($process.ExitCode)."
+                }
+                $resolvedHome = Find-WindNinjaHome -SearchRoot $installRoot
+              }
+            }
+          }
+
+          if ($null -eq $resolvedHome) {
+            throw "Could not find bin\\WindNinja_cli.exe after staging WindNinja runtime archive."
+          }
+          Write-Host "Resolved WindNinja runtime: $resolvedHome"
           "PONDWIND_WINDNINJA_HOME=$resolvedHome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Build PondWind
