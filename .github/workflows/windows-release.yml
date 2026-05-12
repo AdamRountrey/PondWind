@@ -1,0 +1,83 @@
+name: Windows Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    env:
+      WINDNINJA_ARCHIVE_URL: ${{ secrets.WINDNINJA_ARCHIVE_URL }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Conda environment
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          activate-environment: predictweather
+          environment-file: environment.yml
+          auto-activate-base: false
+          auto-update-conda: true
+
+      - name: Stage WindNinja runtime
+        shell: powershell
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDNINJA_ARCHIVE_URL)) {
+            throw "Missing WINDNINJA_ARCHIVE_URL secret. Point it to a vetted WindNinja runtime zip for CI builds."
+          }
+          $archivePath = Join-Path $env:RUNNER_TEMP "WindNinjaApp.zip"
+          $extractRoot = Join-Path $env:RUNNER_TEMP "windninja-stage"
+          Invoke-WebRequest -Uri $env:WINDNINJA_ARCHIVE_URL -OutFile $archivePath
+          Expand-Archive -Path $archivePath -DestinationPath $extractRoot -Force
+          $candidateHomes = @(
+            (Join-Path $extractRoot "WindNinjaApp"),
+            $extractRoot
+          )
+          $resolvedHome = $null
+          foreach ($candidate in $candidateHomes) {
+            if (Test-Path (Join-Path $candidate "bin\\WindNinja_cli.exe")) {
+              $resolvedHome = $candidate
+              break
+            }
+          }
+          if ($null -eq $resolvedHome) {
+            throw "Could not find bin\\WindNinja_cli.exe after extracting WindNinja runtime archive."
+          }
+          "PONDWIND_WINDNINJA_HOME=$resolvedHome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build PondWind
+        shell: powershell
+        run: |
+          .\scripts\build_windows_exe.ps1 -WindNinjaHome "$env:PONDWIND_WINDNINJA_HOME"
+
+      - name: Verify build output
+        shell: powershell
+        run: |
+          if (!(Test-Path ".\dist\PondWind\PondWind.exe")) {
+            throw "Expected dist\PondWind\PondWind.exe was not created."
+          }
+
+      - name: Archive release folder
+        shell: powershell
+        run: |
+          Compress-Archive -Path ".\dist\PondWind\*" -DestinationPath ".\dist\PondWind-windows.zip" -Force
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PondWind-windows
+          path: dist/PondWind-windows.zip
+
+      - name: Publish GitHub release asset
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/PondWind-windows.zip

@@ -1,0 +1,34 @@
+.conda-*/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.pyo
+*.pyd
+
+# Local data and generated products
+data/raw/
+data/processed/
+outputs/
+
+# Build and release artifacts
+build/
+dist/
+*.zip
+tools/WindNinjaApp/
+tools/windninja-3.12.2/
+startup_error.txt
+report_build_error.txt
+
+# Local secrets and machine-specific config
+.env
+.env.*
+*.key
+*.p12
+*.pfx
+secrets.*
+*_secret.*
+*_secrets.*
+
+# OS/editor noise
+.DS_Store
+Thumbs.db

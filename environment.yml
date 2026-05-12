@@ -1,0 +1,15 @@
+name: predictweather
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.11
+  - numpy<2
+  - requests
+  - rasterio
+  - pyproj
+  - xarray
+  - cfgrib
+  - eccodes
+  - libblas=*=*openblas
+  - pyinstaller
