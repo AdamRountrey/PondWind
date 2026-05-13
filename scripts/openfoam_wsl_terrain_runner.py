@@ -137,7 +137,11 @@ def _load_terrain(elevation_file: Path, mesh_resolution_m: float, max_horizontal
         while nx * ny > max_horizontal_cells:
             nx = max(2, int(math.floor(nx * 0.9)))
             ny = max(2, int(math.floor(ny * 0.9)))
-        dem = src.read(1, out_shape=(ny + 1, nx + 1), resampling=Resampling.bilinear, masked=True).filled(np.nan).astype(np.float32)
+        dem = (
+            src.read(1, out_shape=(ny + 1, nx + 1), resampling=Resampling.bilinear, masked=True)
+            .astype(np.float32)
+            .filled(np.nan)
+        )
 
     dem = np.flipud(dem)
     finite = dem[np.isfinite(dem)]
