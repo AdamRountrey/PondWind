@@ -79,6 +79,19 @@ def _finite_output_counts(expected_outputs: dict[str, Path]) -> dict[str, int]:
     return counts
 
 
+def _speed_output_stats(speed_path: Path) -> dict[str, float | int]:
+    data, _ = _read_aaigrid(speed_path)
+    valid = data[np.isfinite(data)]
+    if valid.size == 0:
+        return {"finite_count": 0, "min": float("nan"), "max": float("nan"), "mean": float("nan")}
+    return {
+        "finite_count": int(valid.size),
+        "min": float(valid.min()),
+        "max": float(valid.max()),
+        "mean": float(valid.mean()),
+    }
+
+
 def run_openfoam_domain_average(
     elevation_tif: Path,
     output_dir: Path,
@@ -225,6 +238,24 @@ def run_openfoam_domain_average(
                 "request_json": str(request_path),
                 "finite_counts": finite_counts,
                 "empty_outputs": empty_outputs,
+                "expected_outputs": {key: str(value) for key, value in expected_outputs.items()},
+            },
+        )
+
+    speed_stats = _speed_output_stats(expected_outputs["speed"])
+    speed_limit = max(float(os.environ.get("PONDWIND_OPENFOAM_MAX_OUTPUT_SPEED_MPS", "75")), float(wind_speed_mps) * 8.0)
+    if float(speed_stats["max"]) > speed_limit:
+        raise OpenFoamRunError(
+            stage="openfoam_outputs",
+            message="OpenFOAM runner completed but produced physically implausible wind speeds",
+            command=command,
+            output_dir=output_dir,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            details={
+                "request_json": str(request_path),
+                "speed_stats_mps": speed_stats,
+                "speed_limit_mps": speed_limit,
                 "expected_outputs": {key: str(value) for key, value in expected_outputs.items()},
             },
         )

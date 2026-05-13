@@ -30,6 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vertical-cells", type=int, default=int(os.environ.get("PONDWIND_OPENFOAM_VERTICAL_CELLS", "8")))
     parser.add_argument("--domain-height-m", type=float, default=float(os.environ.get("PONDWIND_OPENFOAM_DOMAIN_HEIGHT_M", "250")))
     parser.add_argument("--max-horizontal-cells", type=int, default=int(os.environ.get("PONDWIND_OPENFOAM_MAX_HORIZONTAL_CELLS", "12000")))
+    parser.add_argument("--max-output-speed-mps", type=float, default=float(os.environ.get("PONDWIND_OPENFOAM_MAX_OUTPUT_SPEED_MPS", "75")))
     return parser.parse_args()
 
 
@@ -104,6 +105,11 @@ def _run_solver(case_dir: Path) -> str:
     return _run_wsl(f'simpleFoam -case "{case_arg}"')
 
 
+def _run_potential_solver(case_dir: Path) -> str:
+    case_arg = _windows_to_wsl_path(case_dir)
+    return _run_wsl(f'potentialFoam -case "{case_arg}" -initialiseUBCs -writep')
+
+
 def _run_sampler(case_dir: Path) -> str:
     case_arg = _windows_to_wsl_path(case_dir)
     try:
@@ -141,6 +147,39 @@ def _aaigrid_has_finite(path: Path) -> bool:
             rows.extend(float(item) for item in line.split())
     data = np.array(rows, dtype=np.float32)
     return bool(rows) and bool((np.isfinite(data) & (data != nodata)).any())
+
+
+def _aaigrid_stats(path: Path) -> dict[str, float | int]:
+    data = []
+    nodata = -9999.0
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for line in lines[:6]:
+        parts = line.split()
+        if len(parts) == 2 and parts[0].lower() == "nodata_value":
+            nodata = float(parts[1])
+            break
+    for line in lines[6:]:
+        if line.strip():
+            data.extend(float(item) for item in line.split())
+    array = np.array(data, dtype=np.float32)
+    valid = array[np.isfinite(array) & (array != nodata)]
+    if valid.size == 0:
+        return {"finite_count": 0, "min": float("nan"), "max": float("nan"), "mean": float("nan")}
+    return {
+        "finite_count": int(valid.size),
+        "min": float(valid.min()),
+        "max": float(valid.max()),
+        "mean": float(valid.mean()),
+    }
+
+
+def _validate_speed_output(args: argparse.Namespace) -> None:
+    stats = _aaigrid_stats(Path(args.speed_output))
+    if int(stats["finite_count"]) == 0:
+        raise RuntimeError("OpenFOAM output contained no finite wind speed values.")
+    speed_limit = max(float(args.max_output_speed_mps), float(args.speed_mps) * 8.0)
+    if float(stats["max"]) > speed_limit:
+        raise RuntimeError(f"OpenFOAM output speed exceeded sanity limit: stats={stats}, limit_mps={speed_limit:.3f}")
 
 
 def _load_terrain(elevation_file: Path, mesh_resolution_m: float, max_horizontal_cells: int) -> dict:
@@ -483,6 +522,20 @@ def _latest_time_dir(case_dir: Path) -> Path:
     return sorted(candidates, key=lambda item: item[0])[-1][1]
 
 
+def _clear_solver_outputs(case_dir: Path) -> None:
+    post_processing = case_dir / "postProcessing"
+    if post_processing.exists():
+        shutil.rmtree(post_processing)
+    for child in case_dir.iterdir():
+        if not child.is_dir() or child.name == "0":
+            continue
+        try:
+            float(child.name)
+        except ValueError:
+            continue
+        shutil.rmtree(child)
+
+
 def _parse_internal_u_vectors(u_path: Path, expected_count: int) -> np.ndarray:
     vector_pattern = re.compile(r"^\s*\(\s*([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)\s*\)")
     vectors = []
@@ -533,6 +586,26 @@ def _write_outputs(args: argparse.Namespace, terrain_info: dict, sample_path: Pa
         _write_aaigrid(Path(path), data, xllcorner=terrain_info["left"], yllcorner=terrain_info["bottom"], cellsize=terrain_info["cellsize"])
 
 
+def _sample_outputs(args: argparse.Namespace, terrain_info: dict) -> Path:
+    post_processing = Path(args.case_dir) / "postProcessing"
+    if post_processing.exists():
+        shutil.rmtree(post_processing)
+    try:
+        _run_sampler(Path(args.case_dir))
+        sample_path = _find_sample_output(Path(args.case_dir))
+        _write_outputs(args, terrain_info, sample_path)
+        if not _aaigrid_has_finite(Path(args.speed_output)) or not _aaigrid_has_finite(Path(args.direction_output)):
+            raise RuntimeError("OpenFOAM sample output contained no finite wind values.")
+        _validate_speed_output(args)
+        return sample_path
+    except Exception:
+        sample_path = _write_outputs_from_volume_field(args, terrain_info)
+        if not _aaigrid_has_finite(Path(args.speed_output)) or not _aaigrid_has_finite(Path(args.direction_output)):
+            raise RuntimeError("OpenFOAM volume-field fallback produced no finite wind values.")
+        _validate_speed_output(args)
+        return sample_path
+
+
 def main() -> None:
     args = parse_args()
     request_path = Path(args.request_json)
@@ -554,20 +627,18 @@ def main() -> None:
     logs = []
     logs.append(_run_wsl('foamRun -help >/dev/null || simpleFoam -help >/dev/null', timeout_seconds=60))
     logs.append(_run_wsl(f'blockMesh -case "{_windows_to_wsl_path(case_dir)}"'))
-    logs.append(_run_solver(case_dir))
-    sampling_mode = "function_object"
+    sampling_mode = "rans"
     try:
-        logs.append(_run_sampler(case_dir))
-        sample_path = _find_sample_output(case_dir)
-        _write_outputs(args, terrain_info, sample_path)
-        if not _aaigrid_has_finite(Path(args.speed_output)) or not _aaigrid_has_finite(Path(args.direction_output)):
-            raise RuntimeError("OpenFOAM sample output contained no finite wind values.")
+        logs.append(_run_solver(case_dir))
+        sample_path = _sample_outputs(args, terrain_info)
     except Exception as exc:
-        sampling_mode = "lowest_volume_layer"
-        logs.append(f"Function-object sampling failed; using lowest volume layer fallback: {exc!r}")
-        sample_path = _write_outputs_from_volume_field(args, terrain_info)
-        if not _aaigrid_has_finite(Path(args.speed_output)) or not _aaigrid_has_finite(Path(args.direction_output)):
-            raise RuntimeError("OpenFOAM volume-field fallback produced no finite wind values.")
+        if not _foam_command_exists("potentialFoam"):
+            raise
+        sampling_mode = "potential_fallback"
+        logs.append(f"RANS solve/sampling failed sanity checks; using potentialFoam fallback: {exc!r}")
+        _clear_solver_outputs(case_dir)
+        logs.append(_run_potential_solver(case_dir))
+        sample_path = _sample_outputs(args, terrain_info)
 
     summary = {
         "runner": "openfoam_wsl_terrain_runner",
@@ -577,6 +648,8 @@ def main() -> None:
         "sampling_mode": sampling_mode,
         "wind_speed_mps": float(args.speed_mps),
         "wind_direction_deg": float(args.direction_deg),
+        "speed_output_stats": _aaigrid_stats(Path(args.speed_output)),
+        "max_output_speed_mps": float(args.max_output_speed_mps),
         "mesh_resolution_m": float(args.mesh_resolution_m),
         "horizontal_cells": int(terrain_info["nx"] * terrain_info["ny"]),
         "vertical_cells": int(args.vertical_cells),
