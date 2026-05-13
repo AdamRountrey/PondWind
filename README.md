@@ -101,6 +101,14 @@ python scripts\run_barton_weekly_report.py `
 
 The OpenFOAM runner is intentionally not bundled. It must accept the command-line arguments PondWind passes, read `--request-json`, and write at least a wind speed ASCII grid plus a wind direction ASCII grid. The runner can either write the exact paths named in the request JSON, or write `speed.asc` and `direction.asc` into `--output-dir`.
 
+For adapter testing without OpenFOAM, the repository includes a reference runner that writes uniform wind grids using the same output contract:
+
+```powershell
+$env:PONDWIND_OPENFOAM_RUNNER = ".\.conda-sitewind\python.exe scripts\openfoam_uniform_runner.py"
+```
+
+This confirms PondWind's OpenFOAM plumbing, but it is not a CFD solve and should not be used as a scientific wind product.
+
 Top-level report deliverables are:
 
 - `weekly_report.md`
