@@ -8,7 +8,9 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from predictweather.windninja import expected_windninja_ascii_paths
+import numpy as np
+
+from predictweather.windninja import _read_aaigrid, expected_windninja_ascii_paths
 
 
 @dataclass
@@ -65,6 +67,16 @@ def _normalize_outputs(output_dir: Path, expected_outputs: dict[str, Path]) -> N
     }
     for key, candidates in aliases.items():
         _copy_first_existing(candidates, expected_outputs[key])
+
+
+def _finite_output_counts(expected_outputs: dict[str, Path]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for key, path in expected_outputs.items():
+        if not path.exists():
+            continue
+        data, _ = _read_aaigrid(path)
+        counts[key] = int(np.isfinite(data).sum())
+    return counts
 
 
 def run_openfoam_domain_average(
@@ -197,6 +209,24 @@ def run_openfoam_domain_average(
             stderr=completed.stderr,
             missing_outputs=missing_outputs,
             details={"request_json": str(request_path)},
+        )
+
+    finite_counts = _finite_output_counts(expected_outputs)
+    empty_outputs = [key for key in required_keys if finite_counts.get(key, 0) == 0]
+    if empty_outputs:
+        raise OpenFoamRunError(
+            stage="openfoam_outputs",
+            message="OpenFOAM runner completed but produced no finite values in required ASCII outputs",
+            command=command,
+            output_dir=output_dir,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            details={
+                "request_json": str(request_path),
+                "finite_counts": finite_counts,
+                "empty_outputs": empty_outputs,
+                "expected_outputs": {key: str(value) for key, value in expected_outputs.items()},
+            },
         )
 
     return {

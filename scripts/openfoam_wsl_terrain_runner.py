@@ -164,15 +164,16 @@ def _load_terrain(elevation_file: Path, mesh_resolution_m: float, max_horizontal
     if finite.size == 0:
         raise RuntimeError("DEM has no finite terrain values for OpenFOAM mesh generation.")
     dem = np.where(np.isfinite(dem), dem, float(np.nanmedian(finite))).astype(np.float32)
-    dx = width_m / nx
-    dy = height_m / ny
+    cellsize = max(width_m / nx, height_m / ny)
+    dx = cellsize
+    dy = cellsize
     return {
         "terrain": dem,
         "nx": nx,
         "ny": ny,
         "dx": dx,
         "dy": dy,
-        "cellsize": float((dx + dy) * 0.5),
+        "cellsize": float(cellsize),
         "left": float(bounds.left),
         "bottom": float(bounds.bottom),
     }

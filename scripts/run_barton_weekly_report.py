@@ -1017,6 +1017,8 @@ def _build_wind_products(
         )
         speed_grid, member_header = _read_aaigrid(member_ascii["speed"])
         direction_grid_deg, _ = _read_aaigrid(member_ascii["direction"])
+        speed_finite_cells = int(np.isfinite(speed_grid).sum())
+        direction_finite_cells = int(np.isfinite(direction_grid_deg).sum())
         if speed_header is None:
             speed_header = member_header
         speed_members.append(speed_grid)
@@ -1028,11 +1030,19 @@ def _build_wind_products(
                 "wind_speed_mps": member_speed_mps,
                 "wind_speed_kts": member_speed_mps * 1.94384449,
                 "wind_from_direction_deg": member_direction_deg,
+                "speed_finite_cells": speed_finite_cells,
+                "direction_finite_cells": direction_finite_cells,
+                "speed_output": str(member_ascii["speed"]),
+                "direction_output": str(member_ascii["direction"]),
             }
         )
 
     speed_stack = np.stack(speed_members, axis=0).astype(np.float32)
     direction_stack_deg = np.stack(direction_members_deg, axis=0).astype(np.float32)
+    if not np.isfinite(speed_stack).any():
+        raise RuntimeError(f"{solver_display} GEFS sigma ensemble produced no finite speed cells: {member_records}")
+    if not np.isfinite(direction_stack_deg).any():
+        raise RuntimeError(f"{solver_display} GEFS sigma ensemble produced no finite direction cells: {member_records}")
     speed_std_kts = (np.nanstd(speed_stack, axis=0) * 1.94384449).astype(np.float32)
 
     direction_rad = np.deg2rad(direction_stack_deg)
@@ -1041,6 +1051,10 @@ def _build_wind_products(
     resultant_length = np.sqrt(sin_mean * sin_mean + cos_mean * cos_mean)
     resultant_length = np.clip(resultant_length, 1.0e-6, 1.0)
     direction_std_deg = np.rad2deg(np.sqrt(-2.0 * np.log(resultant_length))).astype(np.float32)
+    if not np.isfinite(speed_std_kts).any():
+        raise RuntimeError(f"Wind speed spread grid has no finite cells after ensemble reduction: {member_records}")
+    if not np.isfinite(direction_std_deg).any():
+        raise RuntimeError(f"Wind direction spread grid has no finite cells after ensemble reduction: {member_records}")
 
     if speed_header is None:
         raise RuntimeError("GEFS sigma ensemble did not produce any members.")

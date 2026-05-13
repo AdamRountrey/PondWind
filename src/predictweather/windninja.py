@@ -552,19 +552,7 @@ def _legend_canvas(
 ) -> Path:
     valid = field[np.isfinite(field)]
     if valid.size == 0:
-        map_height, map_width = base_rgb.shape[:2]
-        legend_width = 190
-        footer_band_height = 48 if footer_text else 0
-        canvas_height = max(map_height + footer_band_height, 320)
-        canvas = np.full((canvas_height, map_width + legend_width, 3), 255, dtype=np.uint8)
-        canvas[:map_height, :map_width] = base_rgb.astype(np.uint8)
-        _draw_text(canvas, map_width + 24, 32, title, (0, 0, 0), scale=3)
-        _draw_text(canvas, map_width + 24, 58, units, (0, 0, 0), scale=2)
-        _draw_text(canvas, map_width + 24, 96, "no finite", (0, 0, 0), scale=2)
-        _draw_text(canvas, map_width + 24, 118, "preview data", (0, 0, 0), scale=2)
-        if footer_text:
-            _draw_text(canvas, 24, canvas_height - 34, footer_text, (0, 0, 0), scale=2)
-        return _write_png(output_png, canvas)
+        raise ValueError(f"No finite data available for {title} preview.")
 
     if signed:
         max_abs = float(np.max(np.abs(valid)))
@@ -732,6 +720,8 @@ def write_windninja_knots_vector_preview_from_arrays(
         vector_v_mps[:, -edge_trim_cells:] = np.nan
 
     valid = speed_kts[np.isfinite(speed_kts)]
+    if valid.size == 0:
+        raise ValueError("No finite source wind speeds available for wind preview.")
     vmin = float(np.percentile(valid, 2))
     vmax = float(np.percentile(valid, 98))
     if vmax <= vmin:
@@ -1106,6 +1096,9 @@ def write_scalar_diagnostic_preview(
     base_rgb = np.repeat(dem_base[:, :, None], 3, axis=2).astype(np.float32)
     if source_header is not None:
         source_field = field.astype(np.float32)
+        source_finite_count = int(np.isfinite(source_field).sum())
+        if source_finite_count == 0:
+            raise ValueError(f"No finite source data available for {title} preview.")
         field, _, _ = _reproject_array_to_basemap(
             source_field,
             source_header=source_header,
@@ -1118,6 +1111,12 @@ def write_scalar_diagnostic_preview(
                 source_header=source_header,
                 basemap_tif=dem_basemap_tif,
                 resampling=Resampling.nearest,
+            )
+        if not np.isfinite(field).any():
+            raise ValueError(
+                f"No finite {title} preview cells after mapping source grid to basemap. "
+                f"source_finite_cells={source_finite_count}; source_header={source_header}; "
+                f"basemap={dem_basemap_tif}"
             )
     return _legend_canvas(
         field=field,
