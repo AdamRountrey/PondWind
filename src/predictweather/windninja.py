@@ -552,7 +552,19 @@ def _legend_canvas(
 ) -> Path:
     valid = field[np.isfinite(field)]
     if valid.size == 0:
-        raise ValueError("No finite data available for preview.")
+        map_height, map_width = base_rgb.shape[:2]
+        legend_width = 190
+        footer_band_height = 48 if footer_text else 0
+        canvas_height = max(map_height + footer_band_height, 320)
+        canvas = np.full((canvas_height, map_width + legend_width, 3), 255, dtype=np.uint8)
+        canvas[:map_height, :map_width] = base_rgb.astype(np.uint8)
+        _draw_text(canvas, map_width + 24, 32, title, (0, 0, 0), scale=3)
+        _draw_text(canvas, map_width + 24, 58, units, (0, 0, 0), scale=2)
+        _draw_text(canvas, map_width + 24, 96, "no finite", (0, 0, 0), scale=2)
+        _draw_text(canvas, map_width + 24, 118, "preview data", (0, 0, 0), scale=2)
+        if footer_text:
+            _draw_text(canvas, 24, canvas_height - 34, footer_text, (0, 0, 0), scale=2)
+        return _write_png(output_png, canvas)
 
     if signed:
         max_abs = float(np.max(np.abs(valid)))
@@ -765,6 +777,13 @@ def write_windninja_knots_vector_preview_from_arrays(
             basemap_tif=dem_basemap_tif,
             resampling=Resampling.bilinear,
         )
+        if np.isfinite(normalized).any() and not np.isfinite(normalized_full).any():
+            normalized_full, _, _ = _reproject_array_to_basemap(
+                normalized.astype(np.float32),
+                source_header=source_header,
+                basemap_tif=dem_basemap_tif,
+                resampling=Resampling.nearest,
+            )
     else:
         normalized_full = _bilinear_resize(normalized.astype(np.float32), map_height, map_width)
     overlay_rgb = _interpolate_colormap(np.clip(normalized_full, 0.0, 1.0), colormap).astype(np.float32)
@@ -788,18 +807,39 @@ def write_windninja_knots_vector_preview_from_arrays(
             basemap_tif=dem_basemap_tif,
             resampling=Resampling.bilinear,
         )
+        if np.isfinite(vector_speed_kts).any() and not np.isfinite(vector_speed_final).any():
+            vector_speed_final, _, _ = _reproject_array_to_basemap(
+                vector_speed_kts.astype(np.float32),
+                source_header=source_header,
+                basemap_tif=dem_basemap_tif,
+                resampling=Resampling.nearest,
+            )
         vector_u_final, _, _ = _reproject_array_to_basemap(
             vector_u_mps.astype(np.float32),
             source_header=source_header,
             basemap_tif=dem_basemap_tif,
             resampling=Resampling.bilinear,
         )
+        if np.isfinite(vector_u_mps).any() and not np.isfinite(vector_u_final).any():
+            vector_u_final, _, _ = _reproject_array_to_basemap(
+                vector_u_mps.astype(np.float32),
+                source_header=source_header,
+                basemap_tif=dem_basemap_tif,
+                resampling=Resampling.nearest,
+            )
         vector_v_final, _, _ = _reproject_array_to_basemap(
             vector_v_mps.astype(np.float32),
             source_header=source_header,
             basemap_tif=dem_basemap_tif,
             resampling=Resampling.bilinear,
         )
+        if np.isfinite(vector_v_mps).any() and not np.isfinite(vector_v_final).any():
+            vector_v_final, _, _ = _reproject_array_to_basemap(
+                vector_v_mps.astype(np.float32),
+                source_header=source_header,
+                basemap_tif=dem_basemap_tif,
+                resampling=Resampling.nearest,
+            )
         pixel_stride = max(8, int(round((source_cell / base_cell_for_arrow) * max(1, int(vector_stride)))))
         row_start = pixel_stride // 2
         col_base = pixel_stride // 2
@@ -1065,12 +1105,20 @@ def write_scalar_diagnostic_preview(
         dem_base = src.read(1, masked=True).filled(0).astype(np.uint8)
     base_rgb = np.repeat(dem_base[:, :, None], 3, axis=2).astype(np.float32)
     if source_header is not None:
+        source_field = field.astype(np.float32)
         field, _, _ = _reproject_array_to_basemap(
-            field.astype(np.float32),
+            source_field,
             source_header=source_header,
             basemap_tif=dem_basemap_tif,
             resampling=Resampling.bilinear,
         )
+        if np.isfinite(source_field).any() and not np.isfinite(field).any():
+            field, _, _ = _reproject_array_to_basemap(
+                source_field,
+                source_header=source_header,
+                basemap_tif=dem_basemap_tif,
+                resampling=Resampling.nearest,
+            )
     return _legend_canvas(
         field=field,
         base_rgb=base_rgb,
