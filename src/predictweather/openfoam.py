@@ -30,7 +30,10 @@ class OpenFoamRunError(RuntimeError):
 
 
 def _split_command(command_text: str) -> list[str]:
-    return shlex.split(command_text, posix=(os.name != "nt"))
+    if os.name != "nt":
+        return shlex.split(command_text)
+
+    return [part.strip("\"'") for part in shlex.split(command_text, posix=False)]
 
 
 def _runner_command() -> list[str]:
