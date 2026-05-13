@@ -109,6 +109,35 @@ $env:PONDWIND_OPENFOAM_RUNNER = ".\.conda-sitewind\python.exe scripts\openfoam_u
 
 This confirms PondWind's OpenFOAM plumbing, but it is not a CFD solve and should not be used as a scientific wind product.
 
+For an actual experimental CFD path, install OpenFOAM in WSL/Ubuntu and use the WSL runner:
+
+```powershell
+wsl --install -d Ubuntu-24.04
+```
+
+Inside Ubuntu, install OpenFOAM 13:
+
+```bash
+sudo apt update
+sudo apt -y install wget software-properties-common
+sudo sh -c "wget -O - https://dl.openfoam.org/gpg.key > /etc/apt/trusted.gpg.d/openfoam.asc"
+sudo add-apt-repository http://dl.openfoam.org/ubuntu
+sudo apt update
+sudo apt -y install openfoam13
+echo ". /opt/openfoam13/etc/bashrc" >> ~/.bashrc
+. ~/.bashrc
+foamRun -help
+```
+
+Then back in PowerShell:
+
+```powershell
+$env:PONDWIND_OPENFOAM_RUNNER = ".\.conda-sitewind\python.exe scripts\openfoam_wsl_terrain_runner.py"
+$env:PONDWIND_OPENFOAM_MAX_HORIZONTAL_CELLS = "12000"
+```
+
+The WSL runner is intentionally experimental. It generates a small terrain-following OpenFOAM case, runs OpenFOAM in WSL, samples wind 10 m above terrain, and writes PondWind-compatible ASCII grids. It is not yet calibrated against WindNinja or observations.
+
 Top-level report deliverables are:
 
 - `weekly_report.md`
