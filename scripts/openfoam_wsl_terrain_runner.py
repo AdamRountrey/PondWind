@@ -127,6 +127,22 @@ def _write_aaigrid(path: Path, data: np.ndarray, *, xllcorner: float, yllcorner:
             handle.write(" ".join(f"{value:.6f}" for value in row) + "\n")
 
 
+def _aaigrid_has_finite(path: Path) -> bool:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    nodata = -9999.0
+    for line in lines[:6]:
+        parts = line.split()
+        if len(parts) == 2 and parts[0].lower() == "nodata_value":
+            nodata = float(parts[1])
+            break
+    rows = []
+    for line in lines[6:]:
+        if line.strip():
+            rows.extend(float(item) for item in line.split())
+    data = np.array(rows, dtype=np.float32)
+    return bool(rows) and bool((np.isfinite(data) & (data != nodata)).any())
+
+
 def _load_terrain(elevation_file: Path, mesh_resolution_m: float, max_horizontal_cells: int) -> dict:
     with rasterio.open(elevation_file) as src:
         bounds = src.bounds
@@ -406,7 +422,7 @@ def _write_case_files(case_dir: Path, terrain_info: dict, wind_u: float, wind_v:
         for i in range(terrain_info["nx"]):
             x = terrain_info["left"] + (i + 0.5) * terrain_info["dx"]
             y = terrain_info["bottom"] + (j + 0.5) * terrain_info["dy"]
-            z = float(np.mean(terrain[j : j + 2, i : i + 2])) + 10.0
+            z = float(np.max(terrain[j : j + 2, i : i + 2])) + 10.0
             points.append(f"        ({x:.6f} {y:.6f} {z:.6f})")
     (system_dir / "sampleDict").write_text(
         "\n".join(
@@ -543,10 +559,14 @@ def main() -> None:
         logs.append(_run_sampler(case_dir))
         sample_path = _find_sample_output(case_dir)
         _write_outputs(args, terrain_info, sample_path)
+        if not _aaigrid_has_finite(Path(args.speed_output)) or not _aaigrid_has_finite(Path(args.direction_output)):
+            raise RuntimeError("OpenFOAM sample output contained no finite wind values.")
     except Exception as exc:
         sampling_mode = "lowest_volume_layer"
         logs.append(f"Function-object sampling failed; using lowest volume layer fallback: {exc!r}")
         sample_path = _write_outputs_from_volume_field(args, terrain_info)
+        if not _aaigrid_has_finite(Path(args.speed_output)) or not _aaigrid_has_finite(Path(args.direction_output)):
+            raise RuntimeError("OpenFOAM volume-field fallback produced no finite wind values.")
 
     summary = {
         "runner": "openfoam_wsl_terrain_runner",
