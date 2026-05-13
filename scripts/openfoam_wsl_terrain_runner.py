@@ -67,16 +67,18 @@ def _windows_to_wsl_path(path: Path) -> str:
 
 def _run_wsl(command: str, timeout_seconds: int = 1800) -> str:
     bashrc_override = os.environ.get("PONDWIND_OPENFOAM_BASHRC", "").strip()
-    source_lines = []
+    source_lines = ["set +e", 'foam_bashrc=""']
     if bashrc_override:
-        source_lines.append(f'if [ -f "{bashrc_override}" ]; then . "{bashrc_override}"; fi')
+        source_lines.append(f'if [ -f "{bashrc_override}" ]; then foam_bashrc="{bashrc_override}"; fi')
     source_lines.extend(
         [
-            'if [ -f "/opt/openfoam13/etc/bashrc" ]; then . "/opt/openfoam13/etc/bashrc"; fi',
-            'for f in /opt/openfoam*/etc/bashrc /usr/lib/openfoam/openfoam*/etc/bashrc; do [ -f "$f" ] && . "$f" && break; done',
+            'if [ -z "\\$foam_bashrc" ] && [ -f "/opt/openfoam13/etc/bashrc" ]; then foam_bashrc="/opt/openfoam13/etc/bashrc"; fi',
+            'if [ -z "\\$foam_bashrc" ]; then for f in /opt/openfoam*/etc/bashrc /usr/lib/openfoam/openfoam*/etc/bashrc; do if [ -f "\\$f" ]; then foam_bashrc="\\$f"; break; fi; done; fi',
+            'if [ -n "\\$foam_bashrc" ]; then . "\\$foam_bashrc"; fi',
+            "set -e",
         ]
     )
-    shell_command = "\n".join(["set -e", *source_lines, command])
+    shell_command = "\n".join([*source_lines, command])
     completed = subprocess.run(
         ["wsl", "bash", "-lc", shell_command],
         check=True,
@@ -97,9 +99,9 @@ def _foam_command_exists(command: str) -> bool:
 
 def _run_solver(case_dir: Path) -> str:
     case_arg = _windows_to_wsl_path(case_dir)
-    if _foam_command_exists("simpleFoam"):
-        return _run_wsl(f'simpleFoam -case "{case_arg}"')
-    return _run_wsl(f'foamRun -solver incompressibleFluid -case "{case_arg}"')
+    if _foam_command_exists("foamRun"):
+        return _run_wsl(f'foamRun -solver incompressibleFluid -case "{case_arg}"')
+    return _run_wsl(f'simpleFoam -case "{case_arg}"')
 
 
 def _run_sampler(case_dir: Path) -> str:
@@ -384,7 +386,7 @@ def _write_case_files(case_dir: Path, terrain_info: dict, wind_u: float, wind_v:
         _foam_header("dictionary", "fvSolution")
         + "\n".join(
             [
-                "solvers { p { solver GAMG; tolerance 1e-7; relTol 0.01; smoother GaussSeidel; } U { solver smoothSolver; smoother symGaussSeidel; tolerance 1e-8; relTol 0.1; } k { solver smoothSolver; smoother symGaussSeidel; tolerance 1e-8; relTol 0.1; } epsilon { solver smoothSolver; smoother symGaussSeidel; tolerance 1e-8; relTol 0.1; } }",
+                "solvers { p { solver PCG; preconditioner DIC; tolerance 1e-7; relTol 0.01; } U { solver smoothSolver; smoother symGaussSeidel; tolerance 1e-8; relTol 0.1; } k { solver smoothSolver; smoother symGaussSeidel; tolerance 1e-8; relTol 0.1; } epsilon { solver smoothSolver; smoother symGaussSeidel; tolerance 1e-8; relTol 0.1; } }",
                 "SIMPLE { nNonOrthogonalCorrectors 1; residualControl { p 1e-3; U 1e-4; k 1e-4; epsilon 1e-4; } }",
                 "relaxationFactors { equations { U 0.7; k 0.7; epsilon 0.7; } }",
                 "",
@@ -447,6 +449,58 @@ def _parse_sample_vectors(path: Path, expected_count: int) -> np.ndarray:
     return np.array(vectors, dtype=np.float32)
 
 
+def _latest_time_dir(case_dir: Path) -> Path:
+    candidates = []
+    for child in case_dir.iterdir():
+        if child.is_dir():
+            try:
+                candidates.append((float(child.name), child))
+            except ValueError:
+                continue
+    if not candidates:
+        raise RuntimeError("OpenFOAM case has no numeric time output directory.")
+    return sorted(candidates, key=lambda item: item[0])[-1][1]
+
+
+def _parse_internal_u_vectors(u_path: Path, expected_count: int) -> np.ndarray:
+    vector_pattern = re.compile(r"^\s*\(\s*([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)\s*\)")
+    vectors = []
+    in_internal_field = False
+    for line in u_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("internalField"):
+            in_internal_field = True
+            continue
+        if in_internal_field and stripped == ");":
+            break
+        if not in_internal_field:
+            continue
+        match = vector_pattern.match(stripped)
+        if match:
+            vectors.append((float(match.group(1)), float(match.group(2)), float(match.group(3))))
+    if len(vectors) != expected_count:
+        raise RuntimeError(f"Expected {expected_count} internal U vectors in {u_path}, found {len(vectors)}.")
+    return np.array(vectors, dtype=np.float32)
+
+
+def _write_outputs_from_volume_field(args: argparse.Namespace, terrain_info: dict) -> Path:
+    nx = terrain_info["nx"]
+    ny = terrain_info["ny"]
+    vertical_cells = int(args.vertical_cells)
+    latest_dir = _latest_time_dir(Path(args.case_dir))
+    vectors = _parse_internal_u_vectors(latest_dir / "U", nx * ny * vertical_cells)
+    columns = vectors.reshape(ny * nx, vertical_cells, 3)
+    lowest_layer = columns[:, 0, :]
+    u_south_to_north = lowest_layer[:, 0].reshape(ny, nx).astype(np.float32)
+    v_south_to_north = lowest_layer[:, 1].reshape(ny, nx).astype(np.float32)
+    u = np.flipud(u_south_to_north)
+    v = np.flipud(v_south_to_north)
+    speed, direction = _speed_direction_from_uv(u, v)
+    for path, data in [(args.speed_output, speed), (args.direction_output, direction), (args.u_output, u), (args.v_output, v)]:
+        _write_aaigrid(Path(path), data, xllcorner=terrain_info["left"], yllcorner=terrain_info["bottom"], cellsize=terrain_info["cellsize"])
+    return latest_dir / "U"
+
+
 def _write_outputs(args: argparse.Namespace, terrain_info: dict, sample_path: Path) -> None:
     nx = terrain_info["nx"]
     ny = terrain_info["ny"]
@@ -480,15 +534,22 @@ def main() -> None:
     logs.append(_run_wsl('foamRun -help >/dev/null || simpleFoam -help >/dev/null', timeout_seconds=60))
     logs.append(_run_wsl(f'blockMesh -case "{_windows_to_wsl_path(case_dir)}"'))
     logs.append(_run_solver(case_dir))
-    logs.append(_run_sampler(case_dir))
-    sample_path = _find_sample_output(case_dir)
-    _write_outputs(args, terrain_info, sample_path)
+    sampling_mode = "function_object"
+    try:
+        logs.append(_run_sampler(case_dir))
+        sample_path = _find_sample_output(case_dir)
+        _write_outputs(args, terrain_info, sample_path)
+    except Exception as exc:
+        sampling_mode = "lowest_volume_layer"
+        logs.append(f"Function-object sampling failed; using lowest volume layer fallback: {exc!r}")
+        sample_path = _write_outputs_from_volume_field(args, terrain_info)
 
     summary = {
         "runner": "openfoam_wsl_terrain_runner",
         "note": "Experimental WSL/OpenFOAM terrain-following case. Validate before scientific use.",
         "case_dir": str(case_dir),
         "sample_path": str(sample_path),
+        "sampling_mode": sampling_mode,
         "wind_speed_mps": float(args.speed_mps),
         "wind_direction_deg": float(args.direction_deg),
         "mesh_resolution_m": float(args.mesh_resolution_m),

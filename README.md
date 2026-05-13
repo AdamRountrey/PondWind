@@ -136,7 +136,7 @@ $env:PONDWIND_OPENFOAM_RUNNER = ".\.conda-sitewind\python.exe scripts\openfoam_w
 $env:PONDWIND_OPENFOAM_MAX_HORIZONTAL_CELLS = "12000"
 ```
 
-The WSL runner is intentionally experimental. It generates a small terrain-following OpenFOAM case, runs OpenFOAM in WSL, samples wind 10 m above terrain, and writes PondWind-compatible ASCII grids. It is not yet calibrated against WindNinja or observations.
+The WSL runner is intentionally experimental. It generates a small terrain-following OpenFOAM case, runs OpenFOAM in WSL, samples wind 10 m above terrain when OpenFOAM sampling is available, and otherwise falls back to the lowest solved volume layer. It writes PondWind-compatible ASCII grids, but is not yet calibrated against WindNinja or observations.
 
 Top-level report deliverables are:
 
