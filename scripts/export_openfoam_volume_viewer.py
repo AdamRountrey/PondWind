@@ -257,8 +257,8 @@ HTML = r"""<!doctype html>
           ];
           const z = (data.terrain[j][i] + data.terrain[j2][i2]) * 0.5;
           const t = (z - zMin) / Math.max(zMax - zMin, 1);
-          const shade = [90 + t * 52, 125 + t * 58, 104 + t * 34].map(Math.round);
-          items.push({ depth: pts.reduce((a, p) => a + p[2], 0) / pts.length, kind: "poly", pts, color: `rgba(${shade[0]},${shade[1]},${shade[2]},0.92)` });
+          const shade = Math.round(54 + t * 46);
+          items.push({ depth: pts.reduce((a, p) => a + p[2], 0) / pts.length, kind: "poly", pts, color: `rgba(${shade},${shade + 3},${shade + 5},0.86)` });
         }
       }
     }
@@ -417,7 +417,7 @@ HTML = r"""<!doctype html>
           for (let i = 1; i < item.pts.length; i += 1) ctx.lineTo(item.pts[i][0], item.pts[i][1]);
           ctx.closePath();
           ctx.fill();
-          ctx.strokeStyle = "rgba(8, 24, 24, 0.16)";
+          ctx.strokeStyle = "rgba(210, 224, 228, 0.08)";
           ctx.lineWidth = 0.7;
           ctx.stroke();
         } else if (item.kind === "line") {
