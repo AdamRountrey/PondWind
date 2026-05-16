@@ -177,6 +177,8 @@ Top-level report deliverables are:
 - `product_3_wind_direction_variance_degrees.png`
 - `product_4_openfoam_experimental_cfd_knots.png` when OpenFOAM comparison is enabled
 - `product_5_openfoam_turbulence_intensity_percent.png` when OpenFOAM turbulence sampling succeeds
+- `product_6_sailing_polar_dem_overlay.png`
+- `product_7_openfoam_sailing_polar_dem_overlay.png` when OpenFOAM comparison succeeds
 - `satellite_rgb_latest.png`
 - `satellite_sst_latest.png`
 - `satellite_chla_estimated.png`
@@ -250,6 +252,15 @@ These should be interpreted as relative uncertainty guidance, not as a perfectly
 - `product_5_openfoam_turbulence_intensity_percent.png`
   - optional experimental neutral-CFD turbulence intensity in `%`
   - uses the same report color scale as the other wind diagnostic maps
+
+- `product_6_sailing_polar_dem_overlay.png`
+  - experimental ILCA 7 / Laser Standard point polar over the cropped DEM
+  - centered on the sampled wind cell near the selected area center
+  - green arrows show best upwind VMG headings, purple arrows show best downwind VMG headings
+
+- `product_7_openfoam_sailing_polar_dem_overlay.png`
+  - optional experimental CFD version of the same sailing polar overlay
+  - written only when the OpenFOAM comparison product completes
 
 - `satellite_rgb_latest.png`
   - latest reasonably clear RGB scene over the report area

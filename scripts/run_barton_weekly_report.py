@@ -948,6 +948,69 @@ def _array_finite_summary(name: str, field: np.ndarray) -> dict:
     }
 
 
+def _write_sailing_polar_overlay_product(
+    *,
+    speed_asc: Path,
+    direction_asc: Path,
+    dem_basemap_tif: Path,
+    output_png: Path,
+    wind_source: str,
+    sailor_weight_lb: float = 175.0,
+    overlay_radius_px: int = 280,
+) -> dict:
+    try:
+        from experimental_laser_polar_point import _choose_point, _draw_polar_dem_overlay, _grid_xy, _polar_samples
+
+        speed_mps, header = _read_aaigrid(speed_asc)
+        direction_deg, _ = _read_aaigrid(direction_asc)
+        row, col = _choose_point(speed_mps, header, argparse.Namespace(row=None, col=None, x=None, y=None))
+        x, y = _grid_xy(header, row, col)
+        tws_knots = float(speed_mps[row, col] * 1.94384449)
+        wind_from_deg = float(direction_deg[row, col] % 360.0)
+        samples = _polar_samples(tws_knots, wind_from_deg, sailor_weight_lb)
+        _draw_polar_dem_overlay(
+            output_png,
+            dem_basemap_tif,
+            samples,
+            wind_from_deg,
+            tws_knots,
+            sailor_weight_lb,
+            x,
+            y,
+            overlay_radius_px,
+            wind_source,
+        )
+        return {
+            "enabled": True,
+            "status": "completed",
+            "product_png": str(output_png),
+            "wind_source": wind_source,
+            "sailor_weight_lb": sailor_weight_lb,
+            "row": int(row),
+            "col": int(col),
+            "x": float(x),
+            "y": float(y),
+            "local_wind_speed_knots": tws_knots,
+            "local_wind_from_direction_deg": wind_from_deg,
+            "note": "Experimental ILCA 7/Laser point polar centered on the sampled wind cell and overlaid on the cropped DEM.",
+        }
+    except Exception as exc:
+        _write_unavailable_panel(
+            output_png,
+            title="sail",
+            line1="Sailing polar unavailable",
+            line2=str(exc),
+        )
+        return {
+            "enabled": True,
+            "status": "failed",
+            "product_png": str(output_png),
+            "wind_source": wind_source,
+            "sailor_weight_lb": sailor_weight_lb,
+            "error": {"type": exc.__class__.__name__, "message": str(exc)},
+        }
+
+
 def _build_wind_products(
     report_dir: Path,
     temp_dir: Path,
@@ -1111,10 +1174,19 @@ def _build_wind_products(
         inset_lines=inset_lines,
         bottom_table_rows=bottom_table_rows,
     )
+    sailing_polar_png = report_dir / "product_6_sailing_polar_dem_overlay.png"
+    sailing_polar = _write_sailing_polar_overlay_product(
+        speed_asc=ascii_paths["speed"],
+        direction_asc=ascii_paths["direction"],
+        dem_basemap_tif=domain.dem_preview_tif,
+        output_png=sailing_polar_png,
+        wind_source="windninja",
+    )
 
     if enable_openfoam_comparison:
         openfoam_png = report_dir / "product_4_openfoam_experimental_cfd_knots.png"
         openfoam_turbulence_png = report_dir / "product_5_openfoam_turbulence_intensity_percent.png"
+        openfoam_sailing_polar_png = report_dir / "product_7_openfoam_sailing_polar_dem_overlay.png"
         openfoam_dir = wind_root / "openfoam_comparison"
         _progress(progress_callback, 40, "Checking experimental OpenFOAM CFD availability...")
         try:
@@ -1171,11 +1243,20 @@ def _build_wind_products(
                     center_value=float(np.nanmean(turbulence_intensity_pct)),
                     footer_text=_footer_timestamp_text(boundary_target_time_utc, "experimental cfd turbulence"),
                 )
+            openfoam_sailing_polar = _write_sailing_polar_overlay_product(
+                speed_asc=openfoam_paths["speed"],
+                direction_asc=openfoam_paths["direction"],
+                dem_basemap_tif=domain.dem_preview_tif,
+                output_png=openfoam_sailing_polar_png,
+                wind_source="openfoam_comparison",
+            )
             openfoam_comparison = {
                 "enabled": True,
                 "status": "completed",
                 "product_png": str(openfoam_png),
                 "turbulence_png": str(openfoam_turbulence_png) if openfoam_turbulence_png.exists() else None,
+                "sailing_polar_overlay_png": str(openfoam_sailing_polar_png),
+                "sailing_polar_overlay": openfoam_sailing_polar,
                 "turbulence_intensity_stats_pct": turbulence_stats,
                 "run": openfoam_run,
                 "windninja_comparison": comparison_metrics,
@@ -1379,6 +1460,7 @@ def _build_wind_products(
         "product_1": str(product1_png),
         "product_2": str(product2_png),
         "product_3": str(product3_png),
+        "sailing_polar_overlay": sailing_polar,
         "speed_std_knots_mean": float(np.nanmean(speed_std_kts)),
         "direction_std_deg_mean": float(np.nanmean(direction_std_deg)),
         "weather_inset": weather_inset,
@@ -1653,9 +1735,11 @@ def _write_markdown_report(report_dir: Path, race_time_local: datetime, site: Si
         note_lines.append("- Cloudy scenes are allowed; this report uses the best recent scene available before race time.")
 
     openfoam_comparison = wind.get("openfoam_comparison", {"enabled": False})
+    sailing_polar = wind.get("sailing_polar_overlay", {})
     openfoam_lines: list[str] = []
     if openfoam_comparison.get("enabled"):
         turbulence_png = openfoam_comparison.get("turbulence_png")
+        openfoam_sailing_polar_png = openfoam_comparison.get("sailing_polar_overlay_png")
         openfoam_lines = [
             "",
             "## Experimental CFD comparison",
@@ -1663,6 +1747,16 @@ def _write_markdown_report(report_dir: Path, race_time_local: datetime, site: Si
             "",
             f"![Experimental CFD comparison]({_app_path(openfoam_comparison['product_png'])})",
             "",
+            *(
+                [
+                    "Experimental CFD sailing polar overlay:",
+                    "",
+                    f"![Experimental CFD sailing polar overlay]({_app_path(openfoam_sailing_polar_png)})",
+                    "",
+                ]
+                if openfoam_sailing_polar_png
+                else []
+            ),
             *(
                 [
                     "Experimental CFD turbulence intensity:",
@@ -1691,6 +1785,16 @@ def _write_markdown_report(report_dir: Path, race_time_local: datetime, site: Si
             "",
             f"![Wind prediction]({_app_path(wind['product_1'])})",
             "",
+            *(
+                [
+                    "Sailing point polar over the cropped DEM:",
+                    "",
+                    f"![Sailing point polar overlay]({_app_path(sailing_polar['product_png'])})",
+                    "",
+                ]
+                if sailing_polar.get("product_png")
+                else []
+            ),
             f"![Wind speed spread]({_app_path(wind['product_2'])})",
             "",
             f"![Wind direction spread]({_app_path(wind['product_3'])})",

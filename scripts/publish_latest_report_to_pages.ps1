@@ -179,6 +179,8 @@ Add-ProductIfPresent $products $reportDirectory "product_2_wind_speed_variance_k
 Add-ProductIfPresent $products $reportDirectory "product_3_wind_direction_variance_degrees.png" "Wind Direction Spread" "Wind"
 Add-ProductIfPresent $products $reportDirectory "product_4_openfoam_experimental_cfd_knots.png" "Experimental CFD Comparison" "Experimental CFD"
 Add-ProductIfPresent $products $reportDirectory "product_5_openfoam_turbulence_intensity_percent.png" "Experimental CFD Turbulence Intensity" "Experimental CFD"
+Add-ProductIfPresent $products $reportDirectory "product_6_sailing_polar_dem_overlay.png" "Sailing Polar Overlay" "Sailing"
+Add-ProductIfPresent $products $reportDirectory "product_7_openfoam_sailing_polar_dem_overlay.png" "Experimental CFD Sailing Polar Overlay" "Sailing"
 Add-ProductIfPresent $products $reportDirectory "satellite_rgb_latest.png" "Latest RGB Satellite" "Satellite"
 Add-ProductIfPresent $products $reportDirectory "satellite_sst_latest.png" "Surface Temperature" "Satellite"
 Add-ProductIfPresent $products $reportDirectory "satellite_chla_estimated.png" "Estimated Chlorophyll-a" "Satellite"
