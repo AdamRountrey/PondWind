@@ -36,3 +36,4 @@ Before publishing a release, at minimum:
 - verify `.gitignore` excludes build/data/output artifacts
 - rebuild the packaged app from a clean tree
 - confirm `LICENSE` and `THIRD_PARTY_NOTICES.md` ship with the release
+- confirm WSL/OpenFOAM is optional and missing CFD dependencies produce a skipped comparison, not a failed report

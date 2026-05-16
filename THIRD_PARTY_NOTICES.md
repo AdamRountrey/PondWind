@@ -27,6 +27,8 @@ The packaged Windows application redistributes third-party software that keeps i
 - If you publish binary releases, include:
   - `LICENSE`
   - `THIRD_PARTY_NOTICES.md`
+  - `SECURITY.md`
+  - `README.md`
   - any upstream license files already bundled by the build output
 
 ## Data sources

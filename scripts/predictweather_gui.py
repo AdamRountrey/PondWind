@@ -65,6 +65,10 @@ class PredictWeatherGui:
         self.report_output_dir_var = StringVar(value=str(_runtime_project_root() / "outputs" / "reports"))
         self.allow_insecure_ssl_var = IntVar(value=0)
         self.force_ecostress_sst_var = IntVar(value=0)
+        self.satellite_rgb_var = IntVar(value=1)
+        self.satellite_sst_var = IntVar(value=1)
+        self.satellite_chla_var = IntVar(value=1)
+        self.satellite_turbidity_var = IntVar(value=1)
         self.status_var = StringVar(value="Ready.")
         self.last_report_path_var = StringVar(value="")
         self.progress_var = IntVar(value=0)
@@ -91,7 +95,7 @@ class PredictWeatherGui:
             ("Center lon", self.center_lon_var, "Longitude"),
             ("Side meters", self.side_meters_var, "Default is 1609.344"),
             ("Site label", self.site_label_var, "Used in folder names"),
-            ("Mesh resolution", self.mesh_resolution_var, "WindNinja mesh resolution in meters"),
+            ("Wind grid size", self.mesh_resolution_var, "Meters per cell. 30 default; 10-15 is slower and more detailed"),
         ]
 
         for row, (label_text, variable, hint) in enumerate(fields):
@@ -101,10 +105,10 @@ class PredictWeatherGui:
             Label(form, text=hint, anchor="w").grid(row=row, column=2, sticky=W, padx=(10, 0), pady=6)
 
         solver_row = len(fields)
-        Label(form, text="Wind solver", anchor="w", width=16).grid(row=solver_row, column=0, sticky=W, padx=(0, 8), pady=6)
+        Label(form, text="Wind products", anchor="w", width=16).grid(row=solver_row, column=0, sticky=W, padx=(0, 8), pady=6)
         solver_combo = ttk.Combobox(form, textvariable=self.wind_solver_var, values=("windninja", "openfoam"), state="readonly", width=33)
         solver_combo.grid(row=solver_row, column=1, sticky=W, pady=6)
-        Label(form, text="OpenFOAM is experimental", anchor="w").grid(row=solver_row, column=2, sticky=W, padx=(10, 0), pady=6)
+        Label(form, text="openfoam is optional and requires WSL/OpenFOAM 13", anchor="w").grid(row=solver_row, column=2, sticky=W, padx=(10, 0), pady=6)
 
         output_row = solver_row + 1
         Label(form, text="Report folder", anchor="w", width=16).grid(row=output_row, column=0, sticky=W, padx=(0, 8), pady=6)
@@ -112,8 +116,17 @@ class PredictWeatherGui:
         output_entry.grid(row=output_row, column=1, sticky=W, pady=6)
         Button(form, text="Browse...", command=self._choose_report_output_dir, padx=10, pady=2).grid(row=output_row, column=2, sticky=W, pady=6)
 
-        Checkbutton(form, text="Allow insecure SSL", variable=self.allow_insecure_ssl_var).grid(row=output_row + 1, column=1, sticky=W, pady=(8, 0))
-        Checkbutton(form, text="Force ECOSTRESS SST", variable=self.force_ecostress_sst_var).grid(row=output_row + 2, column=1, sticky=W, pady=(6, 0))
+        satellite_row = output_row + 1
+        Label(form, text="Satellite products", anchor="w", width=16).grid(row=satellite_row, column=0, sticky=W, padx=(0, 8), pady=(8, 0))
+        satellite_checks = Frame(form)
+        satellite_checks.grid(row=satellite_row, column=1, columnspan=2, sticky=W, pady=(8, 0))
+        Checkbutton(satellite_checks, text="RGB", variable=self.satellite_rgb_var).pack(side=LEFT)
+        Checkbutton(satellite_checks, text="SST", variable=self.satellite_sst_var).pack(side=LEFT, padx=(10, 0))
+        Checkbutton(satellite_checks, text="chl-a", variable=self.satellite_chla_var).pack(side=LEFT, padx=(10, 0))
+        Checkbutton(satellite_checks, text="turbidity", variable=self.satellite_turbidity_var).pack(side=LEFT, padx=(10, 0))
+
+        Checkbutton(form, text="Allow insecure SSL", variable=self.allow_insecure_ssl_var).grid(row=output_row + 2, column=1, sticky=W, pady=(8, 0))
+        Checkbutton(form, text="Force ECOSTRESS SST", variable=self.force_ecostress_sst_var).grid(row=output_row + 3, column=1, sticky=W, pady=(6, 0))
 
         actions = Frame(container, pady=12)
         actions.pack(fill="x")
@@ -173,20 +186,26 @@ class PredictWeatherGui:
             ("Center latitude", self.center_lat_var.get().strip()),
             ("Center longitude", self.center_lon_var.get().strip()),
             ("Side meters", self.side_meters_var.get().strip()),
-            ("Mesh resolution", self.mesh_resolution_var.get().strip()),
+            ("Wind grid size", self.mesh_resolution_var.get().strip()),
         ]
+        parsed_numbers: dict[str, float] = {}
         for label, value in numeric_fields:
             try:
-                float(value)
+                parsed_numbers[label] = float(value)
             except ValueError:
                 self._show_error(f"{label} must be numeric.")
                 return None
+
+        grid_size_m = parsed_numbers["Wind grid size"]
+        if grid_size_m < 10.0 or grid_size_m > 250.0:
+            self._show_error("Wind grid size must be between 10 and 250 meters.")
+            return None
 
         if not self.site_label_var.get().strip():
             self._show_error("Site label cannot be empty.")
             return None
         if self.wind_solver_var.get().strip() not in {"windninja", "openfoam"}:
-            self._show_error("Wind solver must be windninja or openfoam.")
+            self._show_error("Wind products must be windninja or openfoam.")
             return None
 
         return [
@@ -200,6 +219,10 @@ class PredictWeatherGui:
             self.report_output_dir_var.get().strip(),
             str(self.allow_insecure_ssl_var.get()),
             str(self.force_ecostress_sst_var.get()),
+            str(self.satellite_rgb_var.get()),
+            str(self.satellite_sst_var.get()),
+            str(self.satellite_chla_var.get()),
+            str(self.satellite_turbidity_var.get()),
         ]
 
 
@@ -218,8 +241,12 @@ class PredictWeatherGui:
         self._append_log(f"Center: {command[1]}, {command[2]}\n")
         self._append_log(f"Side meters: {command[3]}\n")
         self._append_log(f"Site label: {command[4]}\n")
-        self._append_log(f"Mesh resolution: {command[5]}\n\n")
-        self._append_log(f"Wind solver: {command[6]}\n")
+        self._append_log(f"Wind grid size: {command[5]} m\n\n")
+        self._append_log(f"Wind products: {command[6]}\n")
+        self._append_log(
+            "Satellite products: "
+            f"RGB={command[10]}, SST={command[11]}, chl-a={command[12]}, turbidity={command[13]}\n"
+        )
         self._append_log(f"Report folder: {command[7]}\n\n")
         self.status_var.set("Running report build...")
         self.last_report_path_var.set("")

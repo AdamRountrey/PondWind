@@ -71,11 +71,30 @@ def _run_report_worker(argv: list[str]) -> int:
     except Exception:
         pass
 
-    if len(argv) != 10:
+    if len(argv) not in {10, 14}:
         _emit_worker_event("error", message="Worker received invalid arguments.")
         return 2
 
-    race_time, center_lat, center_lon, side_meters, site_label, mesh_resolution, wind_solver, report_output_dir, allow_insecure_ssl, force_ecostress_sst = argv
+    satellite_rgb = satellite_sst = satellite_chla = satellite_turbidity = "1"
+    if len(argv) == 14:
+        (
+            race_time,
+            center_lat,
+            center_lon,
+            side_meters,
+            site_label,
+            mesh_resolution,
+            wind_solver,
+            report_output_dir,
+            allow_insecure_ssl,
+            force_ecostress_sst,
+            satellite_rgb,
+            satellite_sst,
+            satellite_chla,
+            satellite_turbidity,
+        ) = argv
+    else:
+        race_time, center_lat, center_lon, side_meters, site_label, mesh_resolution, wind_solver, report_output_dir, allow_insecure_ssl, force_ecostress_sst = argv
     if wind_solver == "openfoam" and not os.environ.get("PONDWIND_OPENFOAM_RUNNER"):
         os.environ["PONDWIND_OPENFOAM_RUNNER"] = _default_openfoam_runner_command()
     _emit_worker_event("progress", percent=1, message="Initializing report engine...")
@@ -97,6 +116,10 @@ def _run_report_worker(argv: list[str]) -> int:
             report_output_dir=(report_output_dir or None),
             allow_insecure_ssl=(allow_insecure_ssl == "1"),
             force_ecostress_sst=(force_ecostress_sst == "1"),
+            satellite_rgb=(satellite_rgb == "1"),
+            satellite_sst=(satellite_sst == "1"),
+            satellite_chla=(satellite_chla == "1"),
+            satellite_turbidity=(satellite_turbidity == "1"),
             progress_callback=progress_callback,
         )
         _emit_worker_event("log", text=f"Report written: {report_path}\n")

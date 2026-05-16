@@ -22,6 +22,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--direction-output", required=True)
     parser.add_argument("--u-output", required=True)
     parser.add_argument("--v-output", required=True)
+    parser.add_argument("--vertical-cells", type=int, default=20)
+    parser.add_argument("--domain-height-m", type=float, default=400.0)
+    parser.add_argument("--max-horizontal-cells", type=int, default=12000)
+    parser.add_argument("--water-z0-m", type=float, default=0.0002)
+    parser.add_argument("--grass-z0-m", type=float, default=0.03)
+    parser.add_argument("--tree-z0-m", type=float, default=0.3)
     return parser.parse_args()
 
 
