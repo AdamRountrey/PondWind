@@ -7,6 +7,8 @@ PondWind builds race-day wind and satellite reports for a user-selected square a
 - User-selected site center and area size
 - Buffered `1 m` USGS 3DEP terrain acquisition
 - WindNinja solve on a larger buffered domain, cropped back to the report area
+- Packaged Windows GUI build intended for non-technical users
+- Optional experimental OpenFOAM CFD comparison product for local WSL/OpenFOAM experiments
 - Deterministic wind boundary from a weighted consensus of:
   - `HRDPS`
   - `HRRR`
@@ -21,10 +23,10 @@ PondWind builds race-day wind and satellite reports for a user-selected square a
   - SST
   - estimated chlorophyll-a
   - estimated turbidity
+- GUI checkboxes to skip individual satellite products when you want a faster or smaller report
 - Graceful no-water handling:
   - wind and RGB still run
   - water products become `N/A` panels if the selected area does not have enough water coverage
-- Packaged Windows GUI build
 
 ## Limitations
 
@@ -33,6 +35,7 @@ PondWind builds race-day wind and satellite reports for a user-selected square a
 - Observation weighting is based on nearby station observations, not on-pond observations.
 - Satellite chlorophyll-a and turbidity are estimated remote-sensing products, not in situ measurements.
 - Some model gust products are unavailable or not trustworthy at all forecast hours.
+- Experimental OpenFOAM products require a local WSL/OpenFOAM 13 installation. If it is missing, PondWind skips the CFD comparison and still builds the WindNinja report.
 
 ## Repository layout
 
@@ -44,6 +47,12 @@ PondWind builds race-day wind and satellite reports for a user-selected square a
 - `tools/WindNinjaApp`: local untracked WindNinja runtime staging directory used for local builds and tests
 
 ## Environment
+
+Most users should use a packaged Windows release zip from GitHub Releases. Unzip the full `PondWind` folder and launch:
+
+- `PondWind.exe`
+
+The packaged app bundles the Python runtime and WindNinja runtime needed for normal reports. Users do not need Conda, Python, WSL, or OpenFOAM unless they explicitly choose the experimental OpenFOAM CFD comparison.
 
 The project is currently built around a local Conda environment defined in [`environment.yml`](environment.yml).
 
@@ -87,12 +96,87 @@ Outputs are written under:
 
 If `--report-output-dir` is provided, the report folder is created there instead.
 
+Satellite products are enabled by default. To skip individual satellite products from the CLI:
+
+```powershell
+python scripts\run_barton_weekly_report.py `
+  --no-satellite-rgb `
+  --no-satellite-sst `
+  --no-satellite-chla `
+  --no-satellite-turbidity
+```
+
+Product 1 and the spread products are built with WindNinja. To add a separate experimental OpenFOAM CFD comparison product:
+
+```powershell
+$env:PONDWIND_OPENFOAM_RUNNER = "C:\path\to\run_openfoam_case.ps1"
+python scripts\run_barton_weekly_report.py `
+  --wind-solver openfoam `
+  --race-local-datetime 2026-05-10T14:00:00 `
+  --center-lat 42.31295753946108 `
+  --center-lon -83.75641581917375
+```
+
+The OpenFOAM runner is intentionally experimental. It must accept the command-line arguments PondWind passes, read `--request-json`, and write WindNinja-compatible wind speed, direction, `u`, and `v` ASCII grids. PondWind validates finite values, direction ranges, and speed sanity before the CFD product is allowed into the report.
+
+For adapter testing without OpenFOAM, the repository includes a reference runner that writes uniform wind grids using the same output contract:
+
+```powershell
+$env:PONDWIND_OPENFOAM_RUNNER = ".\.conda-sitewind\python.exe scripts\openfoam_uniform_runner.py"
+```
+
+This confirms PondWind's OpenFOAM plumbing, but it is not a CFD solve and should not be used as a scientific wind product.
+
+For an actual experimental CFD path, install OpenFOAM in WSL/Ubuntu and use the WSL runner:
+
+```powershell
+wsl --install -d Ubuntu-24.04
+```
+
+Inside Ubuntu, install OpenFOAM 13:
+
+```bash
+sudo apt update
+sudo apt -y install wget software-properties-common
+sudo sh -c "wget -O - https://dl.openfoam.org/gpg.key > /etc/apt/trusted.gpg.d/openfoam.asc"
+sudo add-apt-repository http://dl.openfoam.org/ubuntu
+sudo apt update
+sudo apt -y install openfoam13
+echo ". /opt/openfoam13/etc/bashrc" >> ~/.bashrc
+. ~/.bashrc
+foamRun -help
+```
+
+Then back in PowerShell:
+
+```powershell
+$env:PONDWIND_OPENFOAM_RUNNER = ".\.conda-sitewind\python.exe scripts\openfoam_wsl_terrain_runner.py"
+$env:PONDWIND_OPENFOAM_MAX_HORIZONTAL_CELLS = "12000"
+```
+
+The WSL runner is intentionally experimental. It generates a neutral atmospheric boundary layer, terrain-following OpenFOAM 13 case, runs `blockMesh`, `checkMesh`, optional `potentialFoam` initialization, final `foamRun -solver incompressibleFluid`, and `postProcess -latestTime -func sample` at 10 m above terrain. It fails the OpenFOAM comparison product if mesh quality, convergence, sampling, or physical sanity checks fail; it does not substitute a fallback CFD wind map.
+
+If OpenFOAM comparison is selected but WSL/OpenFOAM 13 is unavailable, PondWind writes a friendly skipped CFD panel and continues the report with the production WindNinja products.
+
+OpenFOAM comparison defaults can be tuned with environment variables:
+
+```powershell
+$env:PONDWIND_OPENFOAM_VERTICAL_CELLS = "20"
+$env:PONDWIND_OPENFOAM_DOMAIN_HEIGHT_M = "400"
+$env:PONDWIND_OPENFOAM_MAX_HORIZONTAL_CELLS = "12000"
+$env:PONDWIND_OPENFOAM_WATER_Z0_M = "0.0002"
+$env:PONDWIND_OPENFOAM_GRASS_Z0_M = "0.03"
+$env:PONDWIND_OPENFOAM_TREE_Z0_M = "0.3"
+```
+
 Top-level report deliverables are:
 
 - `weekly_report.md`
 - `product_1_wind_speed_prediction_knots.png`
 - `product_2_wind_speed_variance_knots.png`
 - `product_3_wind_direction_variance_degrees.png`
+- `product_4_openfoam_experimental_cfd_knots.png` when OpenFOAM comparison is enabled
+- `product_5_openfoam_turbulence_intensity_percent.png` when OpenFOAM turbulence sampling succeeds
 - `satellite_rgb_latest.png`
 - `satellite_sst_latest.png`
 - `satellite_chla_estimated.png`
@@ -132,7 +216,7 @@ Each model is sampled near the selected site and converted into common `u/v` win
 - penalizes speed and direction outliers relative to the model cluster
 - applies a gentle recent-skill adjustment from nearby surface observations when available
 
-The resulting consensus wind is passed into WindNinja as the deterministic upstream boundary.
+The resulting consensus wind is passed into WindNinja as the production deterministic upstream boundary. If OpenFOAM comparison is enabled, the same boundary wind is also passed into a separate experimental WSL/OpenFOAM 13 neutral ABL solve and compared against WindNinja in `report_manifest.json`.
 
 ### Wind variability
 
@@ -158,6 +242,15 @@ These should be interpreted as relative uncertainty guidance, not as a perfectly
   - directional spread in `degrees`
   - higher values mean the modeled wind direction is less stable or less agreed upon there
 
+- `product_4_openfoam_experimental_cfd_knots.png`
+  - optional experimental CFD comparison against product 1
+  - uses the same boundary wind and bottom model/weather context as the production wind product
+  - skipped automatically if WSL/OpenFOAM 13 is unavailable
+
+- `product_5_openfoam_turbulence_intensity_percent.png`
+  - optional experimental neutral-CFD turbulence intensity in `%`
+  - uses the same report color scale as the other wind diagnostic maps
+
 - `satellite_rgb_latest.png`
   - latest reasonably clear RGB scene over the report area
 
@@ -180,13 +273,21 @@ PondWind tries to complete a useful report even when some data sources are weak 
 
 - If one deterministic model is missing, the weighted consensus continues with the remaining available models.
 - Some models may provide sustained wind but not gust. In that case, the model still participates, and gust is shown as `n/a`.
+- Remote providers can temporarily return `403`, `404`, `429`, or timeout responses. These are recorded in `report_manifest.json` under `wind.model_errors`.
 - The app uses nearby-station skill weighting when recent observations are available. If not, the deterministic blend falls back to the static consensus weighting only.
+
+### Experimental CFD
+
+- OpenFOAM comparison is optional and never replaces product 1.
+- If WSL or OpenFOAM 13 is missing, the report continues and marks the CFD comparison as skipped.
+- If the OpenFOAM solve fails mesh, convergence, sampling, or physical sanity checks, the CFD product is marked failed instead of silently using fallback data.
 
 ### Water products
 
 - If the selected area does not contain enough water pixels, the wind products still run.
 - RGB still runs if imagery is available.
 - `SST`, `chlorophyll-a`, and `turbidity` degrade gracefully to `N/A` panels instead of failing the whole report.
+- If a satellite product is unchecked in the GUI, PondWind skips that final product and omits it from the markdown report.
 
 ### Report structure
 
@@ -203,6 +304,14 @@ python scripts\predictweather_gui.py
 ```
 
 The GUI lets the user choose the report save folder directly.
+
+The GUI also lets users:
+
+- choose WindNinja-only output or optional experimental OpenFOAM comparison
+- set wind grid size
+- turn individual satellite products on or off
+- force ECOSTRESS SST discovery
+- allow insecure SSL only when a local network requires it
 
 If no custom location is chosen, the packaged `.exe` writes reports to:
 
@@ -228,6 +337,8 @@ This produces:
 - `dist\PondWind\PondWind.exe`
 
 Keep the full `dist\PondWind` folder together when distributing the app.
+
+The build script copies `README.md`, `LICENSE`, `THIRD_PARTY_NOTICES.md`, and `SECURITY.md` into the app folder.
 
 ## GitHub releases
 
@@ -260,8 +371,10 @@ Typical release flow:
 ## GitHub distribution notes
 
 - Do not commit `build/`, `dist/`, `outputs/`, or raw data caches.
+- Do not commit local Conda environments, WindNinja runtime staging folders, OpenFOAM cases, report outputs, or generated GIF/preview diagnostics.
 - Publish the source repository separately from packaged binary releases.
 - If you ship a binary release, zip the full `dist\PondWind` folder and keep the bundled license files with it.
+- Normal users should download the release zip rather than installing Python dependencies manually.
 
 ## License and third-party components
 

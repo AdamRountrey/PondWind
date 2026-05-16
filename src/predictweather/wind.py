@@ -19,6 +19,12 @@ def _bounded_window(src: rasterio.io.DatasetReader, bounds: tuple[float, float, 
     return requested.intersection(full)
 
 
+def _as_float_nan(data: np.ma.MaskedArray | np.ndarray) -> np.ndarray:
+    if np.ma.isMaskedArray(data):
+        return data.astype("float32").filled(np.nan)
+    return np.asarray(data, dtype="float32")
+
+
 def clip_dem_to_bbox(
     source_tif: Path,
     clipped_tif: Path,
@@ -33,7 +39,7 @@ def clip_dem_to_bbox(
         window = _bounded_window(src, source_bounds)
         clipped_data = src.read(window=window, masked=True)
         clipped_transform = src.window_transform(window)
-        clipped_array = clipped_data.filled(np.nan).astype("float32")
+        clipped_array = _as_float_nan(clipped_data)
         clipped_meta = src.meta.copy()
         clipped_meta.update(
             {
@@ -55,7 +61,7 @@ def build_speedup_raster(dem_tif: Path, output_tif: Path, wind_direction_deg: fl
     output_tif.parent.mkdir(parents=True, exist_ok=True)
 
     with rasterio.open(dem_tif) as src:
-        dem = src.read(1, masked=True).filled(np.nan).astype("float32")
+        dem = _as_float_nan(src.read(1, masked=True))
         transform = src.transform
         res_x = abs(transform.a)
         res_y = abs(transform.e)
@@ -131,7 +137,7 @@ def build_coarse_diagnostic_wind(
     output_tif.parent.mkdir(parents=True, exist_ok=True)
 
     with rasterio.open(dem_tif) as src:
-        dem = src.read(1, masked=True).filled(np.nan).astype("float32")
+        dem = _as_float_nan(src.read(1, masked=True))
         transform = src.transform
         src_res_x = abs(transform.a)
         src_res_y = abs(transform.e)
@@ -313,7 +319,7 @@ def write_dem_preview(dem_tif: Path, preview_tif: Path) -> Path:
     preview_tif.parent.mkdir(parents=True, exist_ok=True)
 
     with rasterio.open(dem_tif) as src:
-        dem = src.read(1, masked=True).filled(np.nan).astype("float32")
+        dem = _as_float_nan(src.read(1, masked=True))
         transform = src.transform
         res_x = abs(transform.a)
         res_y = abs(transform.e)
@@ -344,7 +350,7 @@ def write_wind_preview(wind_tif: Path, preview_tif: Path) -> Path:
     preview_tif.parent.mkdir(parents=True, exist_ok=True)
 
     with rasterio.open(wind_tif) as src:
-        wind = src.read(1, masked=True).filled(np.nan).astype("float32")
+        wind = _as_float_nan(src.read(1, masked=True))
         preview = _percentile_scale(wind)
 
         meta = src.meta.copy()
@@ -358,7 +364,7 @@ def write_wind_preview(wind_tif: Path, preview_tif: Path) -> Path:
 
 def write_wind_color_preview(wind_tif: Path, preview_png: Path) -> Path:
     with rasterio.open(wind_tif) as src:
-        wind = src.read(1, masked=True).filled(np.nan).astype("float32")
+        wind = _as_float_nan(src.read(1, masked=True))
 
     valid = wind[np.isfinite(wind)]
     vmin = float(np.percentile(valid, 2))

@@ -58,17 +58,45 @@ def _emit_worker_event(kind: str, **payload: object) -> None:
     sys.stdout.flush()
 
 
+def _default_openfoam_runner_command() -> str:
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}" --openfoam-wsl-runner'
+    runner_path = Path(__file__).resolve().parent / "openfoam_wsl_terrain_runner.py"
+    return f'"{sys.executable}" "{runner_path}"'
+
+
 def _run_report_worker(argv: list[str]) -> int:
     try:
         sys.stdout.reconfigure(line_buffering=True)
     except Exception:
         pass
 
-    if len(argv) != 9:
+    if len(argv) not in {10, 14}:
         _emit_worker_event("error", message="Worker received invalid arguments.")
         return 2
 
-    race_time, center_lat, center_lon, side_meters, site_label, mesh_resolution, report_output_dir, allow_insecure_ssl, force_ecostress_sst = argv
+    satellite_rgb = satellite_sst = satellite_chla = satellite_turbidity = "1"
+    if len(argv) == 14:
+        (
+            race_time,
+            center_lat,
+            center_lon,
+            side_meters,
+            site_label,
+            mesh_resolution,
+            wind_solver,
+            report_output_dir,
+            allow_insecure_ssl,
+            force_ecostress_sst,
+            satellite_rgb,
+            satellite_sst,
+            satellite_chla,
+            satellite_turbidity,
+        ) = argv
+    else:
+        race_time, center_lat, center_lon, side_meters, site_label, mesh_resolution, wind_solver, report_output_dir, allow_insecure_ssl, force_ecostress_sst = argv
+    if wind_solver == "openfoam" and not os.environ.get("PONDWIND_OPENFOAM_RUNNER"):
+        os.environ["PONDWIND_OPENFOAM_RUNNER"] = _default_openfoam_runner_command()
     _emit_worker_event("progress", percent=1, message="Initializing report engine...")
     try:
         from run_barton_weekly_report import build_weekly_report
@@ -84,9 +112,14 @@ def _run_report_worker(argv: list[str]) -> int:
             side_meters=float(side_meters),
             site_label=site_label,
             mesh_resolution=float(mesh_resolution),
+            wind_solver=wind_solver,
             report_output_dir=(report_output_dir or None),
             allow_insecure_ssl=(allow_insecure_ssl == "1"),
             force_ecostress_sst=(force_ecostress_sst == "1"),
+            satellite_rgb=(satellite_rgb == "1"),
+            satellite_sst=(satellite_sst == "1"),
+            satellite_chla=(satellite_chla == "1"),
+            satellite_turbidity=(satellite_turbidity == "1"),
             progress_callback=progress_callback,
         )
         _emit_worker_event("log", text=f"Report written: {report_path}\n")
@@ -125,6 +158,18 @@ def main() -> None:
     try:
         if len(sys.argv) > 1 and sys.argv[1] == "--worker-report-build":
             sys.exit(_run_report_worker(sys.argv[2:]))
+        if len(sys.argv) > 1 and sys.argv[1] == "--openfoam-wsl-runner":
+            from openfoam_wsl_terrain_runner import main as openfoam_runner_main
+
+            sys.argv = [sys.argv[0], *sys.argv[2:]]
+            openfoam_runner_main()
+            return
+        if len(sys.argv) > 1 and sys.argv[1] == "--openfoam-uniform-runner":
+            from openfoam_uniform_runner import main as uniform_runner_main
+
+            sys.argv = [sys.argv[0], *sys.argv[2:]]
+            uniform_runner_main()
+            return
         from predictweather_gui import main as gui_main
 
         gui_main()
