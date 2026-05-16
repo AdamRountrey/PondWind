@@ -1,10 +1,10 @@
 ﻿{
     "version":  1,
     "title":  "PondWind Latest Report",
-    "site_label":  "barton_pond2",
+    "site_label":  "barton_pond3",
     "race_time_local":  "2026-05-17T14:00:00-04:00",
-    "published_at_utc":  "2026-05-16T01:13:41.3466732Z",
-    "source_report_folder":  "20260517_1400_barton_pond2",
+    "published_at_utc":  "2026-05-16T01:48:54.3266014Z",
+    "source_report_folder":  "20260517_1400_barton_pond3",
     "products":  [
                      {
                          "title":  "Wind Speed Prediction",
@@ -23,6 +23,18 @@
                          "category":  "Wind",
                          "image":  "latest/images/product_3_wind_direction_variance_degrees.png",
                          "file_name":  "product_3_wind_direction_variance_degrees.png"
+                     },
+                     {
+                         "title":  "Experimental CFD Comparison",
+                         "category":  "Experimental CFD",
+                         "image":  "latest/images/product_4_openfoam_experimental_cfd_knots.png",
+                         "file_name":  "product_4_openfoam_experimental_cfd_knots.png"
+                     },
+                     {
+                         "title":  "Experimental CFD Turbulence Intensity",
+                         "category":  "Experimental CFD",
+                         "image":  "latest/images/product_5_openfoam_turbulence_intensity_percent.png",
+                         "file_name":  "product_5_openfoam_turbulence_intensity_percent.png"
                      },
                      {
                          "title":  "Latest RGB Satellite",
