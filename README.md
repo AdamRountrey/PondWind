@@ -365,6 +365,50 @@ Typical release flow:
 2. Create and push a tag like `v0.1.0`.
 3. Let GitHub Actions build and attach `PondWind-windows.zip` to the release.
 
+## GitHub Pages report dashboard
+
+PondWind can publish a lightweight static webpage showing the latest report images. The site is intended for GitHub Pages on a separate `gh-pages` branch so report images do not clutter the application source branch.
+
+First-time setup:
+
+```powershell
+cd C:\Users\aroun\Documents\PredictWeather
+powershell -ExecutionPolicy Bypass -File scripts\publish_latest_report_to_pages.ps1
+```
+
+The script:
+
+- finds the newest report under `%LOCALAPPDATA%\PondWind\outputs\reports`, unless `-ReportDir` is provided
+- copies only whitelisted final PNG products
+- writes a sanitized `latest\report.json`
+- updates `index.html`, `styles.css`, and `.nojekyll` on the local `gh-pages` worktree
+- commits and pushes `gh-pages`
+
+The local Pages worktree is created under `.worktrees\gh-pages`, which is ignored by Git on the application branch.
+
+To publish a specific report:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\publish_latest_report_to_pages.ps1 `
+  -ReportDir "$env:LOCALAPPDATA\PondWind\outputs\reports\20260517_1400_barton_pond"
+```
+
+To test without pushing:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\publish_latest_report_to_pages.ps1 -NoPush
+```
+
+After the first push, enable GitHub Pages in repository settings:
+
+- Source: `Deploy from a branch`
+- Branch: `gh-pages`
+- Folder: `/root`
+
+The public page should then be available at:
+
+- `https://adamrountrey.github.io/PondWind/`
+
 ## GitHub distribution notes
 
 - Do not commit `build/`, `dist/`, `outputs/`, or raw data caches.
