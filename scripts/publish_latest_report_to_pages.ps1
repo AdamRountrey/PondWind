@@ -209,15 +209,16 @@ $reportJson = [ordered]@{
 }
 $reportJson | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $latestDir "report.json") -Encoding UTF8
 
+$assetVersion = [System.Uri]::EscapeDataString($reportJson.published_at_utc)
 $cards = foreach ($product in $products) {
     $title = ConvertTo-HtmlText $product.title
     $category = ConvertTo-HtmlText $product.category
-    $image = ConvertTo-HtmlText $product.image
+    $versionedImage = ConvertTo-HtmlText "$($product.image)?v=$assetVersion"
     @"
       <article class="product-card">
         <div class="product-meta">$category</div>
         <h2>$title</h2>
-        <a href="$image"><img src="$image" alt="$title"></a>
+        <a href="$versionedImage"><img src="$versionedImage" alt="$title"></a>
       </article>
 "@
 }
