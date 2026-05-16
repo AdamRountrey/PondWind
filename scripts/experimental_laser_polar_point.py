@@ -339,6 +339,17 @@ def _draw_endpoint(draw: ImageDraw.ImageDraw, xy: tuple[float, float], fill: tup
     draw.ellipse((x - 6, y - 6, x + 6, y + 6), fill=fill)
 
 
+def _draw_halo_line(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[float, float, float, float],
+    fill: tuple[int, int, int, int],
+    width: int,
+    halo_width: int = 4,
+) -> None:
+    draw.line(xy, fill=(255, 255, 255, 215), width=width + halo_width)
+    draw.line(xy, fill=fill, width=width)
+
+
 def _draw_polar(
     output_path: Path,
     samples: list[dict[str, float | str | None]],
@@ -460,6 +471,146 @@ def _draw_polar(
     image.save(output_path)
 
 
+def _dem_preview_image_and_pixel(dem_tif: Path, x: float, y: float) -> tuple[Image.Image, tuple[float, float]]:
+    image = Image.open(dem_tif)
+    model_pixel_scale = image.tag_v2.get(33550)
+    model_tiepoint = image.tag_v2.get(33922)
+    if model_pixel_scale and model_tiepoint and len(model_pixel_scale) >= 2 and len(model_tiepoint) >= 6:
+        tie_pixel_x, tie_pixel_y = float(model_tiepoint[0]), float(model_tiepoint[1])
+        tie_map_x, tie_map_y = float(model_tiepoint[3]), float(model_tiepoint[4])
+        scale_x, scale_y = float(model_pixel_scale[0]), float(model_pixel_scale[1])
+        pixel_x = tie_pixel_x + (x - tie_map_x) / scale_x
+        pixel_y = tie_pixel_y + (tie_map_y - y) / scale_y
+    else:
+        import rasterio
+
+        with rasterio.open(dem_tif) as src:
+            inv_transform = ~src.transform
+            pixel_x, pixel_y = inv_transform * (x, y)
+
+    if image.mode not in ("RGB", "RGBA"):
+        image = image.convert("L")
+        data = np.array(image, dtype=np.float32)
+        finite = data[np.isfinite(data)]
+        if finite.size:
+            lo = float(np.nanpercentile(finite, 1.0))
+            hi = float(np.nanpercentile(finite, 99.0))
+            data = np.clip((data - lo) / max(hi - lo, 1.0e-6) * 255.0, 0.0, 255.0)
+        image = Image.fromarray(data.astype(np.uint8), mode="L").convert("RGB")
+    else:
+        image = image.convert("RGB")
+    return image, (float(pixel_x), float(pixel_y))
+
+
+def _draw_polar_dem_overlay(
+    output_path: Path,
+    dem_tif: Path,
+    samples: list[dict[str, float | str | None]],
+    wind_from_deg: float,
+    tws_knots: float,
+    sailor_weight_lb: float,
+    x: float,
+    y: float,
+    overlay_radius_px: int,
+    wind_source: str,
+) -> None:
+    image, center = _dem_preview_image_and_pixel(dem_tif, x, y)
+    image = image.convert("RGBA")
+    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay, "RGBA")
+
+    font = _font(18)
+    small_font = _font(15, bold=True)
+    label_font = _font(18, bold=True)
+    plot_radius = float(overlay_radius_px)
+    finite_speeds = [float(s["boat_speed_knots"]) for s in samples if s["boat_speed_knots"] is not None]
+    max_speed = max(finite_speeds) if finite_speeds else 1.0
+    scale_max = max(2.0, math.ceil((max_speed + 0.5) * 2.0) / 2.0)
+
+    draw.ellipse(
+        (center[0] - plot_radius, center[1] - plot_radius, center[0] + plot_radius, center[1] + plot_radius),
+        fill=(255, 255, 255, 74),
+        outline=(18, 27, 34, 220),
+        width=3,
+    )
+
+    for speed in np.linspace(scale_max / 4.0, scale_max, 4):
+        r = plot_radius * speed / scale_max
+        box = (center[0] - r, center[1] - r, center[0] + r, center[1] + r)
+        draw.ellipse(box, outline=(255, 255, 255, 215), width=6)
+        draw.ellipse(box, outline=(23, 33, 41, 220), width=3)
+        label_pos = _point_for_heading(center, 8.0, r)
+        _draw_label(draw, (label_pos[0] + 6, label_pos[1] - 8), f"{speed:.1f} kt", small_font, (18, 27, 34))
+
+    for heading in range(0, 360, 30):
+        end = _point_for_heading(center, heading, plot_radius)
+        _draw_halo_line(draw, (center[0], center[1], end[0], end[1]), (23, 33, 41, 205), width=3, halo_width=4)
+        if heading % 90 == 0:
+            label = _point_for_heading(center, heading, plot_radius + 24)
+            text = f"{heading}"
+            bbox = draw.textbbox((0, 0), text, font=small_font)
+            _draw_label(
+                draw,
+                (label[0] - (bbox[2] - bbox[0]) * 0.5, label[1] - (bbox[3] - bbox[1]) * 0.5),
+                text,
+                small_font,
+                (18, 27, 34),
+            )
+
+    points = []
+    for sample in samples:
+        speed = sample["boat_speed_knots"]
+        if speed is None:
+            points.append(None)
+            continue
+        r = plot_radius * float(speed) / scale_max
+        points.append(_point_for_heading(center, float(sample["heading_deg"]), r))
+    for idx in range(360):
+        a = points[idx]
+        b = points[(idx + 1) % 360]
+        if a is None or b is None:
+            continue
+        sample = samples[idx]
+        color = _mode_color(str(sample["mode"]), float(sample["planing_probability"]))
+        _draw_halo_line(draw, (a[0], a[1], b[0], b[1]), (*color, 246), width=6, halo_width=5)
+
+    upwind_pair, downwind_pair = _best_vmg_pairs(samples, wind_from_deg)
+    vmg_up_color = (0, 154, 87, 255)
+    vmg_down_color = (155, 67, 210, 255)
+    for sample in upwind_pair:
+        speed = float(sample["boat_speed_knots"])
+        end = _point_for_heading(center, float(sample["heading_deg"]), plot_radius * speed / scale_max)
+        _draw_outlined_arrow(draw, center, end, vmg_up_color, width=13, head_len=42.0, head_width=34.0)
+        _draw_endpoint(draw, end, vmg_up_color)
+    for sample in downwind_pair:
+        speed = float(sample["boat_speed_knots"])
+        end = _point_for_heading(center, float(sample["heading_deg"]), plot_radius * speed / scale_max)
+        _draw_outlined_arrow(draw, center, end, vmg_down_color, width=13, head_len=42.0, head_width=34.0)
+        _draw_endpoint(draw, end, vmg_down_color)
+
+    center_x, center_y = center
+    draw.ellipse((center_x - 9, center_y - 9, center_x + 9, center_y + 9), fill=(255, 255, 255, 245), outline=(18, 27, 34, 240), width=3)
+    draw.ellipse((center_x - 4, center_y - 4, center_x + 4, center_y + 4), fill=(18, 27, 34, 255))
+
+    wind_arrow_start = _point_for_heading(center, wind_from_deg, plot_radius * 0.92)
+    _draw_outlined_arrow(draw, wind_arrow_start, center, (18, 27, 34, 245), width=7, head_len=28.0, head_width=22.0)
+    wind_label = _point_for_heading(center, wind_from_deg, plot_radius * 1.02)
+    _draw_label(draw, (wind_label[0] - 44, wind_label[1] - 12), "wind from", label_font, (18, 27, 34))
+
+    title_lines = [
+        f"{wind_source} ILCA polar over DEM",
+        f"centered at sampled wind point | {tws_knots:.1f} kt from {wind_from_deg:.0f} deg | sailor {sailor_weight_lb:.0f} lb",
+    ]
+    box = (18, 18, 660, 92)
+    draw.rounded_rectangle(box, radius=8, fill=(255, 255, 255, 224), outline=(18, 27, 34, 180), width=2)
+    draw.text((34, 30), title_lines[0], fill=(18, 27, 34), font=label_font)
+    draw.text((34, 58), title_lines[1], fill=(47, 62, 73), font=font)
+
+    image = Image.alpha_composite(image, overlay).convert("RGB")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(output_path)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Render an experimental ILCA 7 point speed polar from a PondWind wind grid.")
     parser.add_argument("--report-dir", type=Path, default=None, help="Report folder. Defaults to latest PondWind report.")
@@ -470,6 +621,9 @@ def main() -> int:
     parser.add_argument("--x", type=float, default=None)
     parser.add_argument("--y", type=float, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--map-overlay", action="store_true", help="Also write a DEM overlay PNG with the polar centered at the sampled wind point.")
+    parser.add_argument("--overlay-dem-tif", type=Path, default=None, help="DEM preview GeoTIFF for --map-overlay. Defaults to report_temp/domain/site_dem_preview.tif.")
+    parser.add_argument("--overlay-radius-px", type=int, default=260, help="Polar radius in pixels for the DEM overlay.")
     args = parser.parse_args()
 
     report_dir = args.report_dir or (_default_report_dir() if _default_report_dir().exists() else _latest_report_dir())
@@ -490,6 +644,22 @@ def main() -> int:
     png_path = output_dir / f"{stem}.png"
     json_path = output_dir / f"{stem}.json"
     _draw_polar(png_path, samples, wind_from_deg, tws_knots, float(args.sailor_weight_lb), row, col, x, y, args.wind_source)
+    overlay_png_path = None
+    if args.map_overlay:
+        dem_tif = args.overlay_dem_tif or report_dir / "report_temp" / "domain" / "site_dem_preview.tif"
+        overlay_png_path = output_dir / f"{stem}_dem_overlay.png"
+        _draw_polar_dem_overlay(
+            overlay_png_path,
+            dem_tif,
+            samples,
+            wind_from_deg,
+            tws_knots,
+            float(args.sailor_weight_lb),
+            x,
+            y,
+            int(args.overlay_radius_px),
+            args.wind_source,
+        )
 
     summary = {
         "note": "Literature-informed experimental ILCA 7 / Laser Standard point polar. Relative estimate only; not calibrated.",
@@ -524,6 +694,8 @@ def main() -> int:
         "best_downwind_vmg_pair": downwind_pair,
         "samples": samples,
     }
+    if overlay_png_path is not None:
+        summary["dem_overlay_png"] = str(overlay_png_path)
     json_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps({key: summary[key] for key in summary if key != "samples"}, indent=2))
     return 0
