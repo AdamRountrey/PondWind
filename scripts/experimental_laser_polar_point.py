@@ -12,21 +12,33 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 KNOTS_PER_MPS = 1.9438444924406048
+MPS_PER_KNOT = 1.0 / KNOTS_PER_MPS
+ILCA7_LWL_M = 3.81
+ILCA7_BASELINE_WEIGHT_LB = 176.37  # 80 kg baseline used in the Day 2017 Laser dinghy VPP.
+NO_GO_TWA_DEG = 40.0
+BEST_UPWIND_VMG_TWA_DEG = 43.0
 DEFAULT_REPORT_NAME = "20260517_1400_barton_pond3"
-TWS_BINS = np.array([2, 4, 6, 8, 10, 12, 14, 16, 20, 24], dtype=np.float64)
-TWA_BINS = np.array([42, 45, 52, 60, 75, 90, 110, 135, 150, 165, 180], dtype=np.float64)
+MODEL_SOURCES = [
+    "Day 2017, Performance Prediction for Sailing Dinghies, Ocean Engineering",
+    "Binns et al. 2004, Development and Uses of the Virtual Sailing Dinghy",
+    "Clark 2014, full-scale Laser simulator validation data",
+    "Pennanen 2015, Olympic dinghy upwind CFD/VPP thesis",
+]
+TWS_BINS = np.array([2, 4, 6, 8, 10, 12, 14, 16, 20, 24, 30], dtype=np.float64)
+TWA_BINS = np.array([40, 43, 46, 52, 60, 75, 90, 105, 120, 135, 150, 165, 180], dtype=np.float64)
 POLAR_SPEEDS = np.array(
     [
-        [0.0, 1.2, 1.5, 1.7, 1.8, 1.9, 1.9, 1.7, 1.5, 1.3, 1.1],
-        [0.0, 2.5, 2.8, 3.0, 3.2, 3.3, 3.4, 3.1, 2.8, 2.5, 2.2],
-        [0.0, 3.6, 4.0, 4.2, 4.6, 4.8, 4.9, 4.4, 4.0, 3.5, 3.2],
-        [0.0, 4.3, 4.8, 5.0, 5.4, 5.7, 5.8, 5.4, 4.9, 4.3, 3.9],
-        [0.0, 4.8, 5.3, 5.6, 6.2, 6.6, 6.8, 6.2, 5.6, 4.9, 4.5],
-        [0.0, 5.2, 5.6, 6.1, 7.0, 7.5, 8.0, 7.3, 6.2, 5.4, 5.0],
-        [0.0, 5.4, 5.8, 6.5, 8.0, 9.0, 9.6, 8.7, 7.0, 6.0, 5.5],
-        [0.0, 5.6, 6.0, 6.8, 9.3, 10.5, 11.2, 10.0, 8.0, 6.8, 6.1],
-        [0.0, 5.8, 6.1, 7.0, 10.5, 12.0, 12.8, 11.6, 9.5, 8.2, 7.3],
-        [0.0, 5.9, 6.2, 7.0, 11.5, 13.0, 13.6, 12.5, 10.5, 9.2, 8.4],
+        [1.0, 1.12, 1.18, 1.36, 1.55, 1.76, 1.84, 1.88, 1.86, 1.72, 1.48, 1.26, 1.08],
+        [2.08, 2.28, 2.42, 2.68, 2.92, 3.18, 3.32, 3.38, 3.32, 3.08, 2.76, 2.46, 2.18],
+        [3.02, 3.28, 3.46, 3.78, 4.08, 4.48, 4.72, 4.82, 4.66, 4.32, 3.86, 3.46, 3.18],
+        [3.58, 3.86, 4.04, 4.38, 4.75, 5.24, 5.55, 5.72, 5.56, 5.20, 4.70, 4.20, 3.84],
+        [3.88, 4.16, 4.34, 4.72, 5.15, 5.82, 6.32, 6.58, 6.34, 5.88, 5.28, 4.70, 4.26],
+        [4.02, 4.28, 4.48, 4.92, 5.48, 6.62, 7.22, 7.68, 7.26, 6.54, 5.72, 5.10, 4.72],
+        [4.08, 4.34, 4.56, 5.06, 5.82, 7.58, 8.62, 9.25, 8.62, 7.56, 6.42, 5.66, 5.18],
+        [4.14, 4.40, 4.62, 5.16, 6.12, 8.62, 10.0, 10.72, 9.92, 8.62, 7.30, 6.32, 5.72],
+        [4.24, 4.48, 4.70, 5.28, 6.42, 10.0, 11.78, 12.58, 11.80, 10.35, 8.90, 7.70, 6.92],
+        [4.30, 4.52, 4.74, 5.36, 6.62, 11.0, 12.85, 13.62, 12.95, 11.55, 10.05, 8.78, 7.95],
+        [4.35, 4.56, 4.78, 5.44, 6.82, 12.15, 13.75, 14.25, 13.70, 12.55, 11.15, 9.95, 9.05],
     ],
     dtype=np.float64,
 )
@@ -79,53 +91,66 @@ def _interp2(tws_knots: float, twa_deg: float) -> float:
     return float(np.interp(tws, TWS_BINS, angle_values))
 
 
-def _planing_threshold_knots(twa_deg: float, sailor_weight_lb: float) -> float:
-    twa = abs(float(twa_deg))
-    if twa < 65:
-        return 99.0
-    if twa <= 90:
-        base = np.interp(twa, [65, 75, 90], [17.5, 14.5, 13.0])
-    elif twa <= 135:
-        base = np.interp(twa, [90, 110, 135], [13.0, 12.2, 12.8])
-    elif twa <= 165:
-        base = np.interp(twa, [135, 150, 165], [12.8, 14.5, 17.0])
-    else:
-        base = np.interp(twa, [165, 180], [17.0, 19.0])
-    return float(base + (sailor_weight_lb - 175.0) * 0.04)
+def _logistic(value: float, midpoint: float, width: float) -> float:
+    return 1.0 / (1.0 + math.exp(-(value - midpoint) / max(width, 1.0e-6)))
 
 
-def _planing_probability(tws_knots: float, twa_deg: float, sailor_weight_lb: float) -> float:
-    threshold = _planing_threshold_knots(twa_deg, sailor_weight_lb)
-    if threshold > 50:
+def _froude_number(boat_speed_knots: float) -> float:
+    return (boat_speed_knots * MPS_PER_KNOT) / math.sqrt(9.80665 * ILCA7_LWL_M)
+
+
+def _weight_factor(tws_knots: float, twa_deg: float, sailor_weight_lb: float) -> float:
+    delta_kg = (sailor_weight_lb - ILCA7_BASELINE_WEIGHT_LB) / 2.20462262185
+    if tws_knots < 7.0:
+        light_air = (7.0 - tws_knots) / 5.0
+        angle_factor = np.interp(twa_deg, [NO_GO_TWA_DEG, 90.0, 180.0], [0.7, 1.0, 0.85])
+        return float(np.clip(1.0 - delta_kg * 0.0032 * light_air * angle_factor, 0.86, 1.10))
+    if twa_deg < 70.0 and tws_knots > 11.0:
+        heavy_hike = min((tws_knots - 11.0) / 10.0, 1.0)
+        return float(np.clip(1.0 + delta_kg * 0.0020 * heavy_hike, 0.90, 1.12))
+    if 75.0 <= twa_deg <= 150.0 and tws_knots > 12.0:
+        planing_penalty = min((tws_knots - 12.0) / 12.0, 1.0)
+        return float(np.clip(1.0 - delta_kg * 0.0012 * planing_penalty, 0.90, 1.08))
+    return 1.0
+
+
+def _planing_probability(tws_knots: float, twa_deg: float, boat_speed_knots: float, sailor_weight_lb: float) -> float:
+    if twa_deg < 65.0:
         return 0.0
-    x = (tws_knots - threshold) / 1.65
-    probability = 1.0 / (1.0 + math.exp(-x))
-    angle_factor = np.interp(abs(twa_deg), [65, 80, 110, 140, 165, 180], [0.0, 0.65, 1.0, 0.85, 0.25, 0.08])
-    return float(np.clip(probability * angle_factor, 0.0, 1.0))
+    angle_factor = float(np.interp(twa_deg, [65, 80, 105, 130, 155, 180], [0.0, 0.55, 1.0, 0.9, 0.35, 0.10]))
+    wind_threshold = float(np.interp(twa_deg, [65, 80, 105, 130, 155, 180], [17.0, 14.2, 12.6, 13.0, 15.6, 18.5]))
+    wind_threshold += (sailor_weight_lb - ILCA7_BASELINE_WEIGHT_LB) * 0.035
+    wind_part = _logistic(tws_knots, wind_threshold, 1.8)
+    froude_part = _logistic(_froude_number(boat_speed_knots), 0.78, 0.10)
+    return float(np.clip(angle_factor * wind_part * froude_part, 0.0, 1.0))
 
 
-def estimate_ilca7_speed(tws_knots: float, twa_deg: float, sailor_weight_lb: float) -> tuple[float, float, str]:
-    if twa_deg < TWA_BINS[0]:
-        return float("nan"), 0.0, "no-go"
+def _apparent_wind(tws_knots: float, twa_deg: float, boat_speed_knots: float) -> tuple[float, float]:
+    transverse = tws_knots * math.sin(math.radians(twa_deg))
+    forward = tws_knots * math.cos(math.radians(twa_deg)) + max(boat_speed_knots, 0.0)
+    apparent_speed = math.hypot(transverse, forward)
+    apparent_angle = abs(math.degrees(math.atan2(transverse, forward)))
+    return apparent_speed, apparent_angle
+
+
+def estimate_ilca7_speed(tws_knots: float, twa_deg: float, sailor_weight_lb: float) -> tuple[float, float, str, float, float, float]:
+    if twa_deg < NO_GO_TWA_DEG:
+        return float("nan"), 0.0, "no-go", float("nan"), float("nan"), float("nan")
     base = _interp2(tws_knots, twa_deg)
-    planing = _planing_probability(tws_knots, twa_deg, sailor_weight_lb)
-
-    light_factor = 1.0
-    if tws_knots < 8:
-        light_factor -= (sailor_weight_lb - 175.0) * 0.0018 * (8.0 - tws_knots) / 6.0
-    control_factor = 1.0
-    if tws_knots > 14 and twa_deg < 70:
-        control_factor += (sailor_weight_lb - 175.0) * 0.0008 * min(tws_knots - 14.0, 10.0)
-    if planing > 0:
-        control_factor -= (sailor_weight_lb - 175.0) * 0.0009 * planing
-
-    speed = base * float(np.clip(light_factor * control_factor, 0.86, 1.10))
+    speed = base * _weight_factor(tws_knots, twa_deg, sailor_weight_lb)
+    initial_planing = _planing_probability(tws_knots, twa_deg, speed, sailor_weight_lb)
+    if initial_planing > 0.0:
+        reach_factor = float(np.interp(twa_deg, [65, 90, 120, 155, 180], [0.0, 0.45, 0.55, 0.25, 0.05]))
+        speed += initial_planing * reach_factor * max(tws_knots - 10.0, 0.0) * 0.18
+    planing = _planing_probability(tws_knots, twa_deg, speed, sailor_weight_lb)
+    apparent_speed, apparent_angle = _apparent_wind(tws_knots, twa_deg, speed)
+    froude = _froude_number(speed)
     mode = "displacement"
     if planing >= 0.65:
         mode = "planing"
     elif planing >= 0.25:
         mode = "transition"
-    return max(speed, 0.0), planing, mode
+    return max(speed, 0.0), planing, mode, apparent_speed, apparent_angle, froude
 
 
 def _grid_xy(header: dict[str, float], row: int, col: int) -> tuple[float, float]:
@@ -177,7 +202,7 @@ def _polar_samples(tws_knots: float, wind_from_deg: float, sailor_weight_lb: flo
     samples = []
     for heading in range(360):
         twa = _true_wind_angle_deg(float(heading), wind_from_deg)
-        speed, planing, mode = estimate_ilca7_speed(tws_knots, twa, sailor_weight_lb)
+        speed, planing, mode, apparent_speed, apparent_angle, froude = estimate_ilca7_speed(tws_knots, twa, sailor_weight_lb)
         upwind_vmg = speed * math.cos(math.radians(twa)) if math.isfinite(speed) else float("nan")
         downwind_vmg = -upwind_vmg if math.isfinite(upwind_vmg) else float("nan")
         samples.append(
@@ -187,6 +212,9 @@ def _polar_samples(tws_knots: float, wind_from_deg: float, sailor_weight_lb: flo
                 "boat_speed_knots": None if not math.isfinite(speed) else round(speed, 3),
                 "planing_probability": round(planing, 3),
                 "mode": mode,
+                "apparent_wind_speed_knots": None if not math.isfinite(apparent_speed) else round(apparent_speed, 3),
+                "apparent_wind_angle_deg": None if not math.isfinite(apparent_angle) else round(apparent_angle, 3),
+                "froude_lwl": None if not math.isfinite(froude) else round(froude, 3),
                 "upwind_vmg_knots": None if not math.isfinite(upwind_vmg) else round(upwind_vmg, 3),
                 "downwind_vmg_knots": None if not math.isfinite(downwind_vmg) else round(downwind_vmg, 3),
             }
@@ -246,7 +274,7 @@ def _draw_polar(
         label = _point_for_heading(center, heading, plot_radius + 28)
         draw.text((label[0] - 10, label[1] - 6), f"{heading}", fill=(91, 103, 110), font=font)
 
-    no_go = 42.0
+    no_go = NO_GO_TWA_DEG
     wedge_points = [center]
     for angle in np.linspace(wind_from_deg - no_go, wind_from_deg + no_go, 42):
         wedge_points.append(_point_for_heading(center, angle, plot_radius))
@@ -300,7 +328,8 @@ def _draw_polar(
     draw.text((x0, y0 + 94), "Blue: displacement", fill=(38, 132, 202), font=font)
     draw.text((x0, y0 + 120), "Gold: transition", fill=(196, 139, 42), font=font)
     draw.text((x0, y0 + 146), "Red: likely planing", fill=(190, 72, 58), font=font)
-    draw.text((44, 1136), "Prototype polar: relative comparisons only; not calibrated to GPS tracks, waves, current, trim, or sailor skill.", fill=(89, 101, 108), font=font)
+    draw.text((44, 1114), "Literature-informed prototype: Day 2017/Binns/Clark/Pennanen; relative estimate only.", fill=(89, 101, 108), font=font)
+    draw.text((44, 1136), "Not calibrated to Barton GPS tracks, waves, current, trim, kinetics, or sailor skill.", fill=(89, 101, 108), font=font)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     image.save(output_path)
@@ -335,7 +364,21 @@ def main() -> int:
     _draw_polar(png_path, samples, wind_from_deg, tws_knots, float(args.sailor_weight_lb), row, col, x, y, args.wind_source)
 
     summary = {
-        "note": "Experimental ILCA 7 / Laser Standard point polar. Relative estimate only; not calibrated.",
+        "note": "Literature-informed experimental ILCA 7 / Laser Standard point polar. Relative estimate only; not calibrated.",
+        "model": {
+            "name": "ilca7_literature_informed_v1",
+            "basis": MODEL_SOURCES,
+            "baseline_weight_lb": ILCA7_BASELINE_WEIGHT_LB,
+            "lwl_m": ILCA7_LWL_M,
+            "no_go_twa_deg": NO_GO_TWA_DEG,
+            "best_upwind_vmg_twa_deg_reference": BEST_UPWIND_VMG_TWA_DEG,
+            "notes": [
+                "Empirical polar table shaped from published Laser/ILCA VPP and measurement plots.",
+                "Planing is a soft probability using reach angle, wind threshold, and Froude number from ILCA waterline length.",
+                "Apparent wind and VMG are derived from the estimated boat speed for each heading.",
+                "Use for relative comparison only until calibrated with GPS tracks and local water state.",
+            ],
+        },
         "report_dir": str(report_dir),
         "wind_source": args.wind_source,
         "speed_grid": str(speed_path),
