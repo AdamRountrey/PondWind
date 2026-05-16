@@ -8,6 +8,7 @@ dependencies:
   - requests
   - rasterio
   - pyproj
+  - pillow
   - xarray
   - cfgrib
   - eccodes

@@ -1,0 +1,12 @@
+Publish the latest PondWind report to GitHub Pages
+==================================================
+
+Run these commands in PowerShell:
+
+cd C:\Users\aroun\Documents\PredictWeather
+powershell -ExecutionPolicy Bypass -File scripts\publish_latest_report_to_pages.ps1
+
+The page updates here:
+
+https://adamrountrey.github.io/PondWind/
+

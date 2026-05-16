@@ -177,6 +177,8 @@ Top-level report deliverables are:
 - `product_3_wind_direction_variance_degrees.png`
 - `product_4_openfoam_experimental_cfd_knots.png` when OpenFOAM comparison is enabled
 - `product_5_openfoam_turbulence_intensity_percent.png` when OpenFOAM turbulence sampling succeeds
+- `product_6_sailing_polar_dem_overlay.png`
+- `product_7_openfoam_sailing_polar_dem_overlay.png` when OpenFOAM comparison succeeds
 - `satellite_rgb_latest.png`
 - `satellite_sst_latest.png`
 - `satellite_chla_estimated.png`
@@ -250,6 +252,15 @@ These should be interpreted as relative uncertainty guidance, not as a perfectly
 - `product_5_openfoam_turbulence_intensity_percent.png`
   - optional experimental neutral-CFD turbulence intensity in `%`
   - uses the same report color scale as the other wind diagnostic maps
+
+- `product_6_sailing_polar_dem_overlay.png`
+  - experimental ILCA 7 / Laser Standard point polar over the cropped DEM
+  - centered on the sampled wind cell near the selected area center
+  - green arrows show best upwind VMG headings, purple arrows show best downwind VMG headings
+
+- `product_7_openfoam_sailing_polar_dem_overlay.png`
+  - optional experimental CFD version of the same sailing polar overlay
+  - written only when the OpenFOAM comparison product completes
 
 - `satellite_rgb_latest.png`
   - latest reasonably clear RGB scene over the report area
@@ -367,6 +378,50 @@ Typical release flow:
 1. Push source changes to GitHub.
 2. Create and push a tag like `v0.1.0`.
 3. Let GitHub Actions build and attach `PondWind-windows.zip` to the release.
+
+## GitHub Pages report dashboard
+
+PondWind can publish a lightweight static webpage showing the latest report images. The site is intended for GitHub Pages on a separate `gh-pages` branch so report images do not clutter the application source branch.
+
+First-time setup:
+
+```powershell
+cd C:\Users\aroun\Documents\PredictWeather
+powershell -ExecutionPolicy Bypass -File scripts\publish_latest_report_to_pages.ps1
+```
+
+The script:
+
+- finds the newest report under `%LOCALAPPDATA%\PondWind\outputs\reports`, unless `-ReportDir` is provided
+- copies only whitelisted final PNG products
+- writes a sanitized `latest\report.json`
+- updates `index.html`, `styles.css`, and `.nojekyll` on the local `gh-pages` worktree
+- commits and pushes `gh-pages`
+
+The local Pages worktree is created under `.worktrees\gh-pages`, which is ignored by Git on the application branch.
+
+To publish a specific report:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\publish_latest_report_to_pages.ps1 `
+  -ReportDir "$env:LOCALAPPDATA\PondWind\outputs\reports\20260517_1400_barton_pond"
+```
+
+To test without pushing:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\publish_latest_report_to_pages.ps1 -NoPush
+```
+
+After the first push, enable GitHub Pages in repository settings:
+
+- Source: `Deploy from a branch`
+- Branch: `gh-pages`
+- Folder: `/root`
+
+The public page should then be available at:
+
+- `https://adamrountrey.github.io/PondWind/`
 
 ## GitHub distribution notes
 

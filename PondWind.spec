@@ -44,7 +44,7 @@ datas = []
 binaries = []
 hiddenimports = []
 
-for package_name in ("rasterio", "pyproj", "cfgrib", "xarray", "certifi"):
+for package_name in ("rasterio", "pyproj", "PIL", "cfgrib", "xarray", "certifi"):
     pkg_datas, pkg_binaries, pkg_hiddenimports = collect_all(package_name)
     datas += pkg_datas
     binaries += pkg_binaries
@@ -68,6 +68,7 @@ a = Analysis(
     hiddenimports=hiddenimports + [
         "predictweather_gui",
         "run_barton_weekly_report",
+        "experimental_laser_polar_point",
         "openfoam_wsl_terrain_runner",
         "openfoam_uniform_runner",
         "tkinter",
