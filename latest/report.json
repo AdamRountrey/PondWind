@@ -1,10 +1,10 @@
 ﻿{
     "version":  1,
     "title":  "PondWind Latest Report",
-    "site_label":  "barton_pond3",
+    "site_label":  "barton_pond",
     "race_time_local":  "2026-05-17T14:00:00-04:00",
-    "published_at_utc":  "2026-05-16T01:56:41.5043792Z",
-    "source_report_folder":  "20260517_1400_barton_pond3",
+    "published_at_utc":  "2026-05-16T19:57:43.6186338Z",
+    "source_report_folder":  "20260517_1400_barton_pond",
     "products":  [
                      {
                          "title":  "Wind Speed Prediction",
@@ -35,6 +35,18 @@
                          "category":  "Experimental CFD",
                          "image":  "latest/images/product_5_openfoam_turbulence_intensity_percent.png",
                          "file_name":  "product_5_openfoam_turbulence_intensity_percent.png"
+                     },
+                     {
+                         "title":  "Sailing Polar Overlay",
+                         "category":  "Sailing",
+                         "image":  "latest/images/product_6_sailing_polar_dem_overlay.png",
+                         "file_name":  "product_6_sailing_polar_dem_overlay.png"
+                     },
+                     {
+                         "title":  "Experimental CFD Sailing Polar Overlay",
+                         "category":  "Sailing",
+                         "image":  "latest/images/product_7_openfoam_sailing_polar_dem_overlay.png",
+                         "file_name":  "product_7_openfoam_sailing_polar_dem_overlay.png"
                      },
                      {
                          "title":  "Latest RGB Satellite",
