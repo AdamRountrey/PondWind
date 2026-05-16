@@ -214,14 +214,12 @@ HTML = r"""<!doctype html>
     }
 
     function computeMetrics() {
-      const xs = data.x;
-      const ys = data.y;
       const zs = data.terrain.flat();
       metrics = {
-        cx: (Math.min(...xs) + Math.max(...xs)) / 2,
-        cy: (Math.min(...ys) + Math.max(...ys)) / 2,
+        cx: (Math.min(...data.terrain_x) + Math.max(...data.terrain_x)) / 2,
+        cy: (Math.min(...data.terrain_y) + Math.max(...data.terrain_y)) / 2,
         zMin: Math.min(...zs),
-        domain: Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)),
+        domain: Math.max(Math.max(...data.terrain_x) - Math.min(...data.terrain_x), Math.max(...data.terrain_y) - Math.min(...data.terrain_y)),
       };
     }
 
@@ -241,9 +239,9 @@ HTML = r"""<!doctype html>
 
     function drawTerrain(items) {
       if (!state.showTerrain) return;
-      const nx = data.x.length;
-      const ny = data.y.length;
-      const stride = Math.max(1, Math.round(nx / 82));
+      const nx = data.terrain_x.length;
+      const ny = data.terrain_y.length;
+      const stride = Math.max(1, Math.round(nx / 130));
       const zValues = data.terrain.flat();
       const zMin = Math.min(...zValues);
       const zMax = Math.max(...zValues);
@@ -252,10 +250,10 @@ HTML = r"""<!doctype html>
           const i2 = Math.min(i + stride, nx - 1);
           const j2 = Math.min(j + stride, ny - 1);
           const pts = [
-            project(data.x[i], data.y[j], data.terrain[j][i]),
-            project(data.x[i2], data.y[j], data.terrain[j][i2]),
-            project(data.x[i2], data.y[j2], data.terrain[j2][i2]),
-            project(data.x[i], data.y[j2], data.terrain[j2][i]),
+            project(data.terrain_x[i], data.terrain_y[j], data.terrain[j][i]),
+            project(data.terrain_x[i2], data.terrain_y[j], data.terrain[j][i2]),
+            project(data.terrain_x[i2], data.terrain_y[j2], data.terrain[j2][i2]),
+            project(data.terrain_x[i], data.terrain_y[j2], data.terrain[j2][i]),
           ];
           const z = (data.terrain[j][i] + data.terrain[j2][i2]) * 0.5;
           const t = (z - zMin) / Math.max(zMax - zMin, 1);
@@ -540,6 +538,7 @@ def _export_data(
     output_dir: Path,
     heights_m: tuple[float, ...],
     stride: int,
+    terrain_stride: int,
     skip_sample: bool,
 ) -> dict:
     x_vertices, y_vertices, terrain = _parse_block_mesh_vertices(case_dir / "system" / "blockMeshDict")
@@ -558,11 +557,14 @@ def _export_data(
             "note": "Experimental downsampled OpenFOAM volume data for local browser visualization.",
         },
         "stride": stride,
+        "terrain_stride": terrain_stride,
         "dx": round(float(np.nanmedian(np.diff(x_centers))) * stride, 6),
         "dy": round(float(np.nanmedian(np.diff(y_centers))) * stride, 6),
         "x": _downsample_vector(x_centers, stride),
         "y": _downsample_vector(y_centers, stride),
-        "terrain": _downsample_grid(terrain_max, stride),
+        "terrain_x": _downsample_vector(x_centers, terrain_stride),
+        "terrain_y": _downsample_vector(y_centers, terrain_stride),
+        "terrain": _downsample_grid(terrain_max, terrain_stride),
         "speed": _speed_percentiles(layers),
         "layers": [],
     }
@@ -589,7 +591,8 @@ def main() -> int:
     parser.add_argument("--case-dir", type=Path, default=_default_case_dir())
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--heights-m", default=",".join(str(int(h)) for h in DEFAULT_HEIGHTS_M))
-    parser.add_argument("--stride", type=int, default=3, help="Horizontal downsample stride for browser rendering.")
+    parser.add_argument("--stride", type=int, default=3, help="Horizontal downsample stride for wind-field browser rendering.")
+    parser.add_argument("--terrain-stride", type=int, default=1, help="Horizontal downsample stride for terrain rendering.")
     parser.add_argument("--skip-sample", action="store_true", help="Use existing postProcessing/volumePreview samples.")
     args = parser.parse_args()
 
@@ -599,8 +602,9 @@ def main() -> int:
     output_dir = args.output_dir or case_dir.parent / "volume_views" / "interactive"
     heights_m = tuple(float(value.strip()) for value in args.heights_m.split(",") if value.strip())
     stride = max(1, int(args.stride))
+    terrain_stride = max(1, int(args.terrain_stride))
 
-    data = _export_data(case_dir, output_dir, heights_m, stride, args.skip_sample)
+    data = _export_data(case_dir, output_dir, heights_m, stride, terrain_stride, args.skip_sample)
     embedded_json = json.dumps(data, separators=(",", ":")).replace("</", "<\\/")
     (output_dir / "index.html").write_text(HTML.replace("__VOLUME_DATA__", embedded_json), encoding="utf-8")
     manifest = {
@@ -610,9 +614,12 @@ def main() -> int:
         "data": str(output_dir / "volume_data.json"),
         "heights_m": heights_m,
         "stride": stride,
+        "terrain_stride": terrain_stride,
         "grid": {
             "nx": len(data["x"]),
             "ny": len(data["y"]),
+            "terrain_nx": len(data["terrain_x"]),
+            "terrain_ny": len(data["terrain_y"]),
             "layers": len(data["layers"]),
         },
     }
