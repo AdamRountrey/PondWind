@@ -238,6 +238,42 @@ def _mode_color(mode: str, planing_probability: float) -> tuple[int, int, int]:
     return (38, int(132 + 72 * p), int(202 - 80 * p))
 
 
+def _font(size: int, bold: bool = False) -> ImageFont.ImageFont:
+    candidates = [
+        "C:/Windows/Fonts/segoeuib.ttf" if bold else "C:/Windows/Fonts/segoeui.ttf",
+        "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
+    ]
+    for candidate in candidates:
+        try:
+            return ImageFont.truetype(candidate, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _best_vmg_pairs(samples: list[dict[str, float | str | None]], wind_from_deg: float) -> tuple[list[dict[str, float | str | None]], list[dict[str, float | str | None]]]:
+    finite = [sample for sample in samples if sample["boat_speed_knots"] is not None]
+    upwind_candidates = [sample for sample in finite if float(sample["true_wind_angle_deg"]) < 90.0]
+    downwind_candidates = [sample for sample in finite if float(sample["true_wind_angle_deg"]) > 90.0]
+
+    def side(sample: dict[str, float | str | None]) -> int:
+        return -1 if _angle_diff_deg(float(sample["heading_deg"]), wind_from_deg) < 0 else 1
+
+    upwind = []
+    for tack_side in (-1, 1):
+        side_samples = [sample for sample in upwind_candidates if side(sample) == tack_side]
+        if side_samples:
+            upwind.append(max(side_samples, key=lambda sample: float(sample["upwind_vmg_knots"])))
+    downwind = []
+    for gybe_side in (-1, 1):
+        side_samples = [sample for sample in downwind_candidates if side(sample) == gybe_side]
+        if side_samples:
+            downwind.append(max(side_samples, key=lambda sample: float(sample["downwind_vmg_knots"])))
+    upwind.sort(key=lambda sample: float(sample["heading_deg"]))
+    downwind.sort(key=lambda sample: float(sample["heading_deg"]))
+    return upwind, downwind
+
+
 def _draw_polar(
     output_path: Path,
     samples: list[dict[str, float | str | None]],
@@ -253,33 +289,37 @@ def _draw_polar(
     size = 1200
     image = Image.new("RGB", (size, size), (246, 248, 249))
     draw = ImageDraw.Draw(image, "RGBA")
-    font = ImageFont.load_default()
+    font = _font(18)
+    small_font = _font(15)
+    title_font = _font(22, bold=True)
+    label_font = _font(16, bold=True)
     center = (size // 2, size // 2 + 28)
     plot_radius = 410
     finite_speeds = [float(s["boat_speed_knots"]) for s in samples if s["boat_speed_knots"] is not None]
     max_speed = max(finite_speeds) if finite_speeds else 1.0
     scale_max = max(2.0, math.ceil((max_speed + 0.5) * 2.0) / 2.0)
 
-    draw.text((44, 32), "Experimental ILCA 7 / Laser Standard Speed Polar", fill=(22, 34, 42), font=font)
-    draw.text((44, 58), f"{wind_source} point row {row}, col {col} | x {x:.1f}, y {y:.1f}", fill=(70, 86, 95), font=font)
-    draw.text((44, 82), f"Local wind: {tws_knots:.1f} kt from {wind_from_deg:.0f} deg | sailor {sailor_weight_lb:.0f} lb", fill=(70, 86, 95), font=font)
+    draw.text((44, 30), "Experimental ILCA 7 / Laser Standard Speed Polar", fill=(22, 34, 42), font=title_font)
+    draw.text((44, 62), f"{wind_source} point row {row}, col {col} | x {x:.1f}, y {y:.1f}", fill=(70, 86, 95), font=font)
+    draw.text((44, 90), f"Local wind: {tws_knots:.1f} kt from {wind_from_deg:.0f} deg | sailor {sailor_weight_lb:.0f} lb", fill=(70, 86, 95), font=font)
 
     for speed in np.linspace(scale_max / 4.0, scale_max, 4):
         r = plot_radius * speed / scale_max
-        draw.ellipse((center[0] - r, center[1] - r, center[0] + r, center[1] + r), outline=(178, 189, 195, 105), width=1)
-        draw.text((center[0] + 8, center[1] - r - 5), f"{speed:.1f} kt", fill=(104, 116, 122), font=font)
+        draw.ellipse((center[0] - r, center[1] - r, center[0] + r, center[1] + r), outline=(146, 160, 168, 150), width=2)
+        label_pos = _point_for_heading(center, 8.0, r)
+        draw.text((label_pos[0] + 8, label_pos[1] - 5), f"{speed:.1f} kt", fill=(70, 84, 92), font=small_font)
     for heading in range(0, 360, 30):
         end = _point_for_heading(center, heading, plot_radius)
-        draw.line((center[0], center[1], end[0], end[1]), fill=(194, 202, 206, 70), width=1)
+        draw.line((center[0], center[1], end[0], end[1]), fill=(160, 172, 178, 105), width=2)
         label = _point_for_heading(center, heading, plot_radius + 28)
-        draw.text((label[0] - 10, label[1] - 6), f"{heading}", fill=(91, 103, 110), font=font)
+        draw.text((label[0] - 13, label[1] - 9), f"{heading}", fill=(64, 78, 86), font=small_font)
 
     no_go = NO_GO_TWA_DEG
     wedge_points = [center]
     for angle in np.linspace(wind_from_deg - no_go, wind_from_deg + no_go, 42):
         wedge_points.append(_point_for_heading(center, angle, plot_radius))
     draw.polygon(wedge_points, fill=(112, 122, 128, 42))
-    draw.text(_point_for_heading(center, wind_from_deg, plot_radius * 0.58), "NO-GO", fill=(93, 101, 106), font=font)
+    draw.text(_point_for_heading(center, wind_from_deg, plot_radius * 0.58), "NO-GO", fill=(70, 78, 84), font=label_font)
 
     points = []
     modes = []
@@ -302,34 +342,39 @@ def _draw_polar(
         draw.line((a[0], a[1], b[0], b[1]), fill=(*color, 236), width=5)
 
     wind_arrow_end = _point_for_heading(center, wind_from_deg, plot_radius * 0.92)
-    draw.line((wind_arrow_end[0], wind_arrow_end[1], center[0], center[1]), fill=(20, 36, 44, 230), width=4)
+    draw.line((wind_arrow_end[0], wind_arrow_end[1], center[0], center[1]), fill=(20, 36, 44, 235), width=6)
     left = _point_for_heading(wind_arrow_end, wind_from_deg + 158, 22)
     right = _point_for_heading(wind_arrow_end, wind_from_deg - 158, 22)
     draw.polygon([wind_arrow_end, left, right], fill=(20, 36, 44, 230))
-    draw.text((wind_arrow_end[0] + 10, wind_arrow_end[1] - 8), "wind from", fill=(20, 36, 44), font=font)
+    draw.text((wind_arrow_end[0] + 12, wind_arrow_end[1] - 10), "wind from", fill=(20, 36, 44), font=label_font)
 
     finite_samples = [s for s in samples if s["boat_speed_knots"] is not None]
     fastest = max(finite_samples, key=lambda s: float(s["boat_speed_knots"]))
-    upwind = max((s for s in finite_samples if float(s["true_wind_angle_deg"]) < 90), key=lambda s: float(s["upwind_vmg_knots"]), default=None)
-    downwind = max((s for s in finite_samples if float(s["true_wind_angle_deg"]) > 90), key=lambda s: float(s["downwind_vmg_knots"]), default=None)
-    notes = [
-        ("Fastest", fastest, "boat_speed_knots"),
-        ("Best upwind VMG", upwind, "upwind_vmg_knots"),
-        ("Best downwind VMG", downwind, "downwind_vmg_knots"),
-    ]
-    x0, y0 = 815, 855
-    draw.rounded_rectangle((790, 820, 1148, 1078), radius=8, fill=(255, 255, 255, 230), outline=(202, 212, 218, 255))
-    draw.text((x0, y0 - 18), "Point summary", fill=(24, 35, 42), font=font)
-    for i, (label, sample, metric) in enumerate(notes):
-        if sample is None:
-            continue
-        line = f"{label}: {sample['heading_deg']:03.0f} deg, {sample[metric]:.1f} kt"
-        draw.text((x0, y0 + i * 26), line, fill=(46, 61, 70), font=font)
-    draw.text((x0, y0 + 94), "Blue: displacement", fill=(38, 132, 202), font=font)
-    draw.text((x0, y0 + 120), "Gold: transition", fill=(196, 139, 42), font=font)
-    draw.text((x0, y0 + 146), "Red: likely planing", fill=(190, 72, 58), font=font)
-    draw.text((44, 1114), "Literature-informed prototype: Day 2017/Binns/Clark/Pennanen; relative estimate only.", fill=(89, 101, 108), font=font)
-    draw.text((44, 1136), "Not calibrated to Barton GPS tracks, waves, current, trim, kinetics, or sailor skill.", fill=(89, 101, 108), font=font)
+    upwind_pair, downwind_pair = _best_vmg_pairs(samples, wind_from_deg)
+    x0, y0 = 784, 822
+    draw.rounded_rectangle((762, 790, 1164, 1114), radius=8, fill=(255, 255, 255, 236), outline=(186, 198, 206, 255), width=2)
+    draw.text((x0, y0 - 20), "Point summary", fill=(24, 35, 42), font=label_font)
+    draw.text((x0, y0 + 10), f"Fastest: {fastest['heading_deg']:03.0f} deg, {fastest['boat_speed_knots']:.1f} kt", fill=(38, 51, 60), font=font)
+    y_cursor = y0 + 48
+    draw.text((x0, y_cursor), "Best upwind VMG", fill=(38, 51, 60), font=label_font)
+    y_cursor += 26
+    for sample in upwind_pair:
+        line = f"{sample['heading_deg']:03.0f} deg  {sample['upwind_vmg_knots']:.1f} kt VMG  boat {sample['boat_speed_knots']:.1f}"
+        draw.text((x0, y_cursor), line, fill=(46, 61, 70), font=font)
+        y_cursor += 24
+    y_cursor += 8
+    draw.text((x0, y_cursor), "Best downwind VMG", fill=(38, 51, 60), font=label_font)
+    y_cursor += 26
+    for sample in downwind_pair:
+        line = f"{sample['heading_deg']:03.0f} deg  {sample['downwind_vmg_knots']:.1f} kt VMG  boat {sample['boat_speed_knots']:.1f}"
+        draw.text((x0, y_cursor), line, fill=(46, 61, 70), font=font)
+        y_cursor += 24
+    y_cursor += 10
+    draw.text((x0, y_cursor), "Blue: displacement", fill=(38, 132, 202), font=font)
+    draw.text((x0, y_cursor + 24), "Gold: transition", fill=(196, 139, 42), font=font)
+    draw.text((x0, y_cursor + 48), "Red: likely planing", fill=(190, 72, 58), font=font)
+    draw.text((44, 1126), "Literature-informed prototype: Day 2017/Binns/Clark/Pennanen; relative estimate only.", fill=(70, 84, 92), font=font)
+    draw.text((44, 1150), "Not calibrated to Barton GPS tracks, waves, current, trim, kinetics, or sailor skill.", fill=(70, 84, 92), font=font)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     image.save(output_path)
@@ -356,6 +401,9 @@ def main() -> int:
     tws_knots = float(speed_mps[row, col] * KNOTS_PER_MPS)
     wind_from_deg = float(direction_deg[row, col] % 360.0)
     samples = _polar_samples(tws_knots, wind_from_deg, float(args.sailor_weight_lb))
+    upwind_pair, downwind_pair = _best_vmg_pairs(samples, wind_from_deg)
+    finite_samples = [sample for sample in samples if sample["boat_speed_knots"] is not None]
+    fastest = max(finite_samples, key=lambda sample: float(sample["boat_speed_knots"]))
 
     output_dir = args.output_dir or report_dir / "report_temp" / "wind" / "sailing_polar"
     stem = f"ilca7_polar_{args.wind_source}_r{row}_c{col}_{int(round(args.sailor_weight_lb))}lb"
@@ -391,6 +439,9 @@ def main() -> int:
         "local_wind_from_direction_deg": wind_from_deg,
         "sailor_weight_lb": float(args.sailor_weight_lb),
         "png": str(png_path),
+        "fastest": fastest,
+        "best_upwind_vmg_pair": upwind_pair,
+        "best_downwind_vmg_pair": downwind_pair,
         "samples": samples,
     }
     json_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
