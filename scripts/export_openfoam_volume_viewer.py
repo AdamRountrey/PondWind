@@ -538,6 +538,647 @@ HTML = r"""<!doctype html>
 """
 
 
+HTML_THREE = r"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PondWind OpenFOAM Volume Viewer</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background: #10171b;
+      color: #eef4f6;
+    }
+    html, body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      background: #10171b;
+    }
+    #viewer {
+      position: fixed;
+      inset: 0;
+    }
+    .panel {
+      position: fixed;
+      left: 16px;
+      top: 16px;
+      width: min(360px, calc(100vw - 32px));
+      background: rgba(13, 19, 23, 0.88);
+      border: 1px solid rgba(187, 214, 222, 0.24);
+      border-radius: 8px;
+      padding: 14px;
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.28);
+      backdrop-filter: blur(8px);
+      z-index: 2;
+    }
+    h1 {
+      margin: 0 0 4px;
+      font-size: 19px;
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+    .subtle {
+      margin: 0 0 12px;
+      color: #a9bbc2;
+      font-size: 13px;
+      line-height: 1.35;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 116px 1fr;
+      align-items: center;
+      gap: 10px;
+      margin: 9px 0;
+      font-size: 13px;
+    }
+    input[type="range"] {
+      width: 100%;
+    }
+    .checks {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px;
+      margin-top: 8px;
+    }
+    label.check {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      color: #d7e4e8;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    button {
+      border: 1px solid rgba(187, 214, 222, 0.32);
+      border-radius: 6px;
+      background: #22333b;
+      color: #eef4f6;
+      padding: 7px 10px;
+      font: inherit;
+      font-size: 13px;
+    }
+    .legend {
+      position: fixed;
+      right: 16px;
+      top: 16px;
+      width: 260px;
+      background: rgba(13, 19, 23, 0.82);
+      border: 1px solid rgba(187, 214, 222, 0.24);
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 12px;
+      color: #c8d8dd;
+      z-index: 2;
+    }
+    .bar {
+      height: 12px;
+      border-radius: 4px;
+      background: linear-gradient(90deg, #264786, #228bb2, #46b28f, #efc454, #d95f4c);
+      margin: 8px 0 6px;
+    }
+    .legend-scale {
+      display: flex;
+      justify-content: space-between;
+    }
+    .status {
+      position: fixed;
+      left: 16px;
+      bottom: 14px;
+      color: #8fa5ad;
+      font-size: 12px;
+      z-index: 2;
+    }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.165.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.165.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="viewer"></div>
+  <section class="panel">
+    <h1>OpenFOAM Volume Viewer</h1>
+    <p class="subtle">Drag to rotate, wheel to zoom, Shift+drag to pan. WebGL/Three.js rendering from sampled OpenFOAM volume data.</p>
+    <div class="row">
+      <span>Vertical scale</span>
+      <input id="zScale" type="range" min="1" max="10" step="0.25" value="4">
+    </div>
+    <div class="row">
+      <span>Particles</span>
+      <input id="particleCount" type="range" min="0" max="1200" step="25" value="650">
+    </div>
+    <div class="row">
+      <span>Vectors</span>
+      <input id="vectorDensity" type="range" min="0" max="5" step="1" value="2">
+    </div>
+    <div class="row">
+      <span>Streamlines</span>
+      <input id="streamDensity" type="range" min="0" max="5" step="1" value="3">
+    </div>
+    <div class="row">
+      <span>Stream trails</span>
+      <button id="streamTrailToggle" type="button">On</button>
+    </div>
+    <div class="row">
+      <span>Terrain</span>
+      <button id="terrainToggle" type="button">Visible</button>
+    </div>
+    <div class="checks" id="layerChecks"></div>
+  </section>
+  <section class="legend">
+    <strong>Wind speed</strong>
+    <div class="bar"></div>
+    <div class="legend-scale"><span id="speedMin"></span><span id="speedMax"></span></div>
+  </section>
+  <div class="status" id="status">Loading Three.js viewer...</div>
+  <script id="volume-data" type="application/json">__VOLUME_DATA__</script>
+  <script type="module">
+    import * as THREE from "three";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+    import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
+    import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
+    import { LineMaterial } from "three/addons/lines/LineMaterial.js";
+
+    const data = JSON.parse(document.getElementById("volume-data").textContent);
+    const container = document.getElementById("viewer");
+    const status = document.getElementById("status");
+    const state = {
+      zScale: 4,
+      showTerrain: true,
+      animateStreamTrails: true,
+      vectorDensity: 2,
+      streamDensity: 3,
+      particleCount: 650,
+      layersVisible: new Set(data.layers.map(layer => layer.height_m)),
+      particles: [],
+      frame: 0,
+    };
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x10171b);
+    scene.fog = new THREE.Fog(0x10171b, 3600, 8500);
+
+    const camera = new THREE.PerspectiveCamera(46, window.innerWidth / window.innerHeight, 1, 14000);
+    camera.position.set(-2500, 1450, 2500);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    container.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.target.set(0, 170, 0);
+    controls.update();
+
+    const terrainGroup = new THREE.Group();
+    const flowGroup = new THREE.Group();
+    scene.add(terrainGroup, flowGroup);
+    scene.add(new THREE.AmbientLight(0xffffff, 0.78));
+    const sun = new THREE.DirectionalLight(0xffffff, 0.72);
+    sun.position.set(-1200, 2200, 900);
+    scene.add(sun);
+
+    let terrainMesh = null;
+    let terrainWire = null;
+    let streamLines = null;
+    let vectorLines = null;
+    let trailLines = null;
+    let particlePoints = null;
+    let particlePositions = null;
+    let particleColors = null;
+    let streamCache = [];
+
+    const terrainMinX = Math.min(...data.terrain_x);
+    const terrainMaxX = Math.max(...data.terrain_x);
+    const terrainMinY = Math.min(...data.terrain_y);
+    const terrainMaxY = Math.max(...data.terrain_y);
+    const centerX = 0.5 * (terrainMinX + terrainMaxX);
+    const centerY = 0.5 * (terrainMinY + terrainMaxY);
+    const zMin = Math.min(...data.terrain.flat());
+    const zMax = Math.max(...data.terrain.flat());
+
+    function worldX(x) {
+      return x - centerX;
+    }
+
+    function worldZ(y) {
+      return -(y - centerY);
+    }
+
+    function worldY(z) {
+      return (z - zMin) * state.zScale;
+    }
+
+    function colorFor(value) {
+      const t = Math.max(0, Math.min(1, (value - data.speed.p03) / Math.max(data.speed.p97 - data.speed.p03, 0.001)));
+      const stops = [
+        [0x26, 0x47, 0x86],
+        [0x22, 0x8b, 0xb2],
+        [0x46, 0xb2, 0x8f],
+        [0xef, 0xc4, 0x54],
+        [0xd9, 0x5f, 0x4c],
+      ];
+      const pos = t * (stops.length - 1);
+      const i = Math.min(Math.floor(pos), stops.length - 2);
+      const f = pos - i;
+      return [
+        (stops[i][0] * (1 - f) + stops[i + 1][0] * f) / 255,
+        (stops[i][1] * (1 - f) + stops[i + 1][1] * f) / 255,
+        (stops[i][2] * (1 - f) + stops[i + 1][2] * f) / 255,
+      ];
+    }
+
+    function bilinear(grid, x, y) {
+      const fx = (x - data.x[0]) / data.dx;
+      const fy = (y - data.y[0]) / data.dy;
+      const i = Math.floor(fx);
+      const j = Math.floor(fy);
+      if (i < 0 || j < 0 || i >= data.x.length - 1 || j >= data.y.length - 1) return NaN;
+      const tx = fx - i;
+      const ty = fy - j;
+      return grid[j][i] * (1 - tx) * (1 - ty) + grid[j][i + 1] * tx * (1 - ty) + grid[j + 1][i] * (1 - tx) * ty + grid[j + 1][i + 1] * tx * ty;
+    }
+
+    function layerByHeight(height) {
+      return data.layers.find(layer => layer.height_m === height);
+    }
+
+    function addLineSegments(name, positions, colors, lineWidth, opacity) {
+      const geometry = new LineSegmentsGeometry();
+      geometry.setPositions(positions);
+      geometry.setColors(colors);
+      const material = new LineMaterial({
+        vertexColors: true,
+        linewidth: lineWidth,
+        transparent: opacity < 1,
+        opacity,
+        depthWrite: false,
+      });
+      material.resolution.set(window.innerWidth, window.innerHeight);
+      const lines = new LineSegments2(geometry, material);
+      lines.name = name;
+      flowGroup.add(lines);
+      return lines;
+    }
+
+    function disposeObject(object) {
+      if (!object) return;
+      object.removeFromParent();
+      object.geometry?.dispose();
+      object.material?.dispose();
+    }
+
+    function buildTerrain() {
+      disposeObject(terrainMesh);
+      disposeObject(terrainWire);
+      const nx = data.terrain_x.length;
+      const ny = data.terrain_y.length;
+      const positions = new Float32Array(nx * ny * 3);
+      const colors = new Float32Array(nx * ny * 3);
+      const indices = [];
+      let p = 0;
+      let c = 0;
+      for (let j = 0; j < ny; j += 1) {
+        for (let i = 0; i < nx; i += 1) {
+          const z = data.terrain[j][i];
+          positions[p++] = worldX(data.terrain_x[i]);
+          positions[p++] = worldY(z);
+          positions[p++] = worldZ(data.terrain_y[j]);
+          const t = (z - zMin) / Math.max(zMax - zMin, 1);
+          const shade = (42 + t * 50) / 255;
+          colors[c++] = shade;
+          colors[c++] = shade + 0.012;
+          colors[c++] = shade + 0.02;
+        }
+      }
+      for (let j = 0; j < ny - 1; j += 1) {
+        for (let i = 0; i < nx - 1; i += 1) {
+          const a = j * nx + i;
+          const b = a + 1;
+          const d = (j + 1) * nx + i;
+          const e = d + 1;
+          indices.push(a, d, b, b, d, e);
+        }
+      }
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+      geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+      geometry.setIndex(indices);
+      geometry.computeVertexNormals();
+      terrainMesh = new THREE.Mesh(
+        geometry,
+        new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide, transparent: true, opacity: 0.92 })
+      );
+      terrainGroup.add(terrainMesh);
+
+      const wireGeometry = new THREE.WireframeGeometry(geometry);
+      terrainWire = new THREE.LineSegments(
+        wireGeometry,
+        new THREE.LineBasicMaterial({ color: 0xc8d5d8, transparent: true, opacity: 0.055, depthWrite: false })
+      );
+      terrainGroup.add(terrainWire);
+      terrainGroup.visible = state.showTerrain;
+    }
+
+    function trace(layer, seedX, seedY, steps) {
+      const points = [];
+      let x = seedX;
+      let y = seedY;
+      for (let n = 0; n < steps; n += 1) {
+        const u = bilinear(layer.u, x, y);
+        const v = bilinear(layer.v, x, y);
+        const z = bilinear(layer.z, x, y);
+        const speed = bilinear(layer.speed, x, y);
+        if (![u, v, z, speed].every(Number.isFinite) || speed < 0.05) break;
+        points.push({ x, y, z, speed });
+        const step = 24;
+        x += (u / speed) * step;
+        y += (v / speed) * step;
+      }
+      return points;
+    }
+
+    function streamlineSeeds(layer, count) {
+      const minX = data.x[0];
+      const maxX = data.x[data.x.length - 1];
+      const minY = data.y[0];
+      const maxY = data.y[data.y.length - 1];
+      const flatU = layer.u.flat();
+      const flatV = layer.v.flat();
+      const meanU = flatU.reduce((a, b) => a + b, 0) / flatU.length;
+      const meanV = flatV.reduce((a, b) => a + b, 0) / flatV.length;
+      const seeds = [];
+      for (let n = 0; n < count; n += 1) {
+        const t = count === 1 ? 0.5 : n / (count - 1);
+        seeds.push([meanU >= 0 ? minX + 1 : maxX - 1, minY + t * (maxY - minY)]);
+        seeds.push([minX + t * (maxX - minX), meanV >= 0 ? minY + 1 : maxY - 1]);
+      }
+      return seeds;
+    }
+
+    function buildStreams() {
+      disposeObject(streamLines);
+      disposeObject(vectorLines);
+      disposeObject(trailLines);
+      streamCache = [];
+
+      const streamPositions = [];
+      const streamColors = [];
+      const vectorPositions = [];
+      const vectorColors = [];
+      const seedCount = [0, 5, 7, 10, 13, 16][state.streamDensity];
+
+      if (seedCount > 0) {
+        for (const height of state.layersVisible) {
+          const layer = layerByHeight(height);
+          if (!layer) continue;
+          for (const seed of streamlineSeeds(layer, seedCount)) {
+            const traced = trace(layer, seed[0], seed[1], 170);
+            if (traced.length < 8) continue;
+            const points = traced.map(point => new THREE.Vector3(worldX(point.x), worldY(point.z), worldZ(point.y)));
+            const speeds = traced.map(point => point.speed);
+            streamCache.push({ points, speeds });
+            for (let i = 0; i < points.length - 1; i += 1) {
+              const c = colorFor(speeds[i]);
+              streamPositions.push(points[i].x, points[i].y, points[i].z, points[i + 1].x, points[i + 1].y, points[i + 1].z);
+              streamColors.push(...c, ...c);
+            }
+          }
+        }
+      }
+      if (streamPositions.length) {
+        streamLines = addLineSegments("streamlines", streamPositions, streamColors, state.animateStreamTrails ? 1.8 : 3.4, state.animateStreamTrails ? 0.34 : 0.92);
+      }
+
+      const pointStride = [0, 18, 14, 10, 8, 6][state.vectorDensity];
+      if (pointStride > 0) {
+        for (const height of state.layersVisible) {
+          const layer = layerByHeight(height);
+          if (!layer) continue;
+          for (let j = 0; j < layer.y.length; j += pointStride) {
+            for (let i = 0; i < layer.x.length; i += pointStride) {
+              const speed = layer.speed[j][i];
+              const mag = Math.max(speed, 0.001);
+              const len = 36 + speed * 3.0;
+              const x0 = layer.x[i];
+              const y0 = layer.y[j];
+              const z0 = layer.z[j][i];
+              const x1 = x0 + (layer.u[j][i] / mag) * len;
+              const y1 = y0 + (layer.v[j][i] / mag) * len;
+              const z1 = z0 + (layer.w[j][i] / mag) * len;
+              const c = colorFor(speed);
+              vectorPositions.push(worldX(x0), worldY(z0), worldZ(y0), worldX(x1), worldY(z1), worldZ(y1));
+              vectorColors.push(...c, ...c);
+            }
+          }
+        }
+      }
+      if (vectorPositions.length) {
+        vectorLines = addLineSegments("vectors", vectorPositions, vectorColors, 1.45, 0.62);
+      }
+      trailLines = addLineSegments("stream-trails", [], [], 4.8, 0.96);
+      trailLines.visible = state.animateStreamTrails;
+    }
+
+    function resetParticles() {
+      disposeObject(particlePoints);
+      state.particles = [];
+      if (!state.layersVisible.size || state.particleCount <= 0) return;
+      const minX = data.x[0];
+      const maxX = data.x[data.x.length - 1];
+      const minY = data.y[0];
+      const maxY = data.y[data.y.length - 1];
+      const heights = [...state.layersVisible];
+      particlePositions = new Float32Array(state.particleCount * 3);
+      particleColors = new Float32Array(state.particleCount * 3);
+      for (let n = 0; n < state.particleCount; n += 1) {
+        state.particles.push({
+          x: minX + Math.random() * (maxX - minX),
+          y: minY + Math.random() * (maxY - minY),
+          height: heights[n % heights.length],
+          age: Math.random() * 300,
+        });
+      }
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(particlePositions, 3).setUsage(THREE.DynamicDrawUsage));
+      geometry.setAttribute("color", new THREE.BufferAttribute(particleColors, 3).setUsage(THREE.DynamicDrawUsage));
+      particlePoints = new THREE.Points(
+        geometry,
+        new THREE.PointsMaterial({ size: 7.5, sizeAttenuation: true, vertexColors: true, transparent: true, opacity: 0.92, depthWrite: false })
+      );
+      flowGroup.add(particlePoints);
+    }
+
+    function updateParticles() {
+      if (!particlePoints || !particlePositions || !particleColors) return;
+      const minX = data.x[0];
+      const maxX = data.x[data.x.length - 1];
+      const minY = data.y[0];
+      const maxY = data.y[data.y.length - 1];
+      const heights = [...state.layersVisible];
+      for (let n = 0; n < state.particles.length; n += 1) {
+        const particle = state.particles[n];
+        let layer = layerByHeight(particle.height);
+        if (!layer || !state.layersVisible.has(particle.height)) {
+          particle.height = heights[n % Math.max(heights.length, 1)];
+          layer = layerByHeight(particle.height);
+        }
+        if (!layer) continue;
+        const u = bilinear(layer.u, particle.x, particle.y);
+        const v = bilinear(layer.v, particle.x, particle.y);
+        const z = bilinear(layer.z, particle.x, particle.y);
+        const speed = bilinear(layer.speed, particle.x, particle.y);
+        if (![u, v, z, speed].every(Number.isFinite)) {
+          particle.x = minX + Math.random() * (maxX - minX);
+          particle.y = minY + Math.random() * (maxY - minY);
+          particle.age = 0;
+        } else {
+          particle.x += (u / Math.max(speed, 0.01)) * 5.5;
+          particle.y += (v / Math.max(speed, 0.01)) * 5.5;
+          particle.age += 1;
+          if (particle.x < minX || particle.x > maxX || particle.y < minY || particle.y > maxY || particle.age > 420) {
+            particle.x = minX + Math.random() * (maxX - minX);
+            particle.y = minY + Math.random() * (maxY - minY);
+            particle.age = 0;
+          }
+        }
+        const safeZ = Number.isFinite(z) ? z : zMin;
+        particlePositions[n * 3] = worldX(particle.x);
+        particlePositions[n * 3 + 1] = worldY(safeZ) + 2;
+        particlePositions[n * 3 + 2] = worldZ(particle.y);
+        const c = colorFor(Number.isFinite(speed) ? speed : data.speed.p03);
+        particleColors[n * 3] = c[0];
+        particleColors[n * 3 + 1] = c[1];
+        particleColors[n * 3 + 2] = c[2];
+      }
+      particlePoints.geometry.attributes.position.needsUpdate = true;
+      particlePoints.geometry.attributes.color.needsUpdate = true;
+    }
+
+    function updateTrailLines() {
+      if (!trailLines || !state.animateStreamTrails) return;
+      const positions = [];
+      const colors = [];
+      for (let s = 0; s < streamCache.length; s += 1) {
+        const stream = streamCache[s];
+        const head = Math.floor(state.frame * 0.7 + s * 13) % (stream.points.length + 26);
+        const tail = head - 24;
+        for (let i = Math.max(0, tail); i < Math.min(stream.points.length - 1, head); i += 1) {
+          const fade = 1 - Math.abs(i - head) / 24;
+          const c = colorFor(stream.speeds[i]);
+          const lift = 3 + 6 * Math.max(0, fade);
+          const a = stream.points[i];
+          const b = stream.points[i + 1];
+          positions.push(a.x, a.y + lift, a.z, b.x, b.y + lift, b.z);
+          colors.push(...c, ...c);
+        }
+      }
+      trailLines.geometry.dispose();
+      const geometry = new LineSegmentsGeometry();
+      geometry.setPositions(positions);
+      geometry.setColors(colors);
+      trailLines.geometry = geometry;
+      trailLines.visible = true;
+    }
+
+    function rebuildScene() {
+      buildTerrain();
+      buildStreams();
+      resetParticles();
+    }
+
+    function wireControls() {
+      const layerChecks = document.getElementById("layerChecks");
+      for (const layer of data.layers) {
+        const label = document.createElement("label");
+        label.className = "check";
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.checked = true;
+        input.addEventListener("change", () => {
+          if (input.checked) state.layersVisible.add(layer.height_m);
+          else state.layersVisible.delete(layer.height_m);
+          buildStreams();
+          resetParticles();
+        });
+        label.append(input, `${layer.height_m} m`);
+        layerChecks.append(label);
+      }
+      document.getElementById("zScale").addEventListener("input", event => {
+        state.zScale = Number(event.target.value);
+        rebuildScene();
+      });
+      document.getElementById("vectorDensity").addEventListener("input", event => {
+        state.vectorDensity = Number(event.target.value);
+        buildStreams();
+      });
+      document.getElementById("streamDensity").addEventListener("input", event => {
+        state.streamDensity = Number(event.target.value);
+        buildStreams();
+      });
+      document.getElementById("particleCount").addEventListener("input", event => {
+        state.particleCount = Number(event.target.value);
+        resetParticles();
+      });
+      document.getElementById("streamTrailToggle").addEventListener("click", event => {
+        state.animateStreamTrails = !state.animateStreamTrails;
+        event.target.textContent = state.animateStreamTrails ? "On" : "Off";
+        buildStreams();
+      });
+      document.getElementById("terrainToggle").addEventListener("click", event => {
+        state.showTerrain = !state.showTerrain;
+        event.target.textContent = state.showTerrain ? "Visible" : "Hidden";
+        terrainGroup.visible = state.showTerrain;
+      });
+      document.getElementById("speedMin").textContent = `${data.speed.p03.toFixed(1)} m/s`;
+      document.getElementById("speedMax").textContent = `${data.speed.p97.toFixed(1)} m/s`;
+    }
+
+    function resize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      for (const lines of [streamLines, vectorLines, trailLines]) {
+        if (lines?.material?.resolution) lines.material.resolution.set(window.innerWidth, window.innerHeight);
+      }
+    }
+
+    function animate() {
+      state.frame += 1;
+      controls.update();
+      updateParticles();
+      updateTrailLines();
+      renderer.render(scene, camera);
+      requestAnimationFrame(animate);
+    }
+
+    try {
+      wireControls();
+      rebuildScene();
+      status.textContent = "Three.js / BufferGeometry viewer";
+      window.addEventListener("resize", resize);
+      resize();
+      animate();
+    } catch (error) {
+      status.textContent = error.stack || String(error);
+      status.style.color = "#ffb8a8";
+      throw error;
+    }
+  </script>
+</body>
+</html>
+"""
+
+
 def _downsample_grid(grid: np.ndarray, stride: int) -> list[list[float]]:
     small = np.asarray(grid[::stride, ::stride], dtype=np.float32)
     return [[round(float(value), 4) for value in row] for row in small]
@@ -630,7 +1271,7 @@ def main() -> int:
 
     data = _export_data(case_dir, output_dir, heights_m, stride, terrain_stride, args.skip_sample)
     embedded_json = json.dumps(data, separators=(",", ":")).replace("</", "<\\/")
-    (output_dir / "index.html").write_text(HTML.replace("__VOLUME_DATA__", embedded_json), encoding="utf-8")
+    (output_dir / "index.html").write_text(HTML_THREE.replace("__VOLUME_DATA__", embedded_json), encoding="utf-8")
     manifest = {
         "case_dir": str(case_dir),
         "output_dir": str(output_dir),
