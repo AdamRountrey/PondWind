@@ -160,6 +160,10 @@ HTML = r"""<!doctype html>
       <input id="streamDensity" type="range" min="0" max="5" step="1" value="3">
     </div>
     <div class="row">
+      <span>Stream trails</span>
+      <button id="streamTrailToggle" type="button">On</button>
+    </div>
+    <div class="row">
       <span>Terrain</span>
       <button id="terrainToggle" type="button">Visible</button>
     </div>
@@ -182,6 +186,7 @@ HTML = r"""<!doctype html>
       panY: 0,
       zScale: 4.0,
       showTerrain: true,
+      animateStreamTrails: true,
       vectorDensity: 2,
       streamDensity: 3,
       particleCount: 425,
@@ -327,6 +332,7 @@ HTML = r"""<!doctype html>
     function drawStreamlines(items) {
       if (state.streamDensity === 0) return;
       const seedCount = [0, 5, 7, 10, 13, 16][state.streamDensity];
+      let streamIndex = 0;
       for (const height of state.layersVisible) {
         const layer = layerByHeight(height);
         if (!layer) continue;
@@ -344,10 +350,24 @@ HTML = r"""<!doctype html>
           const traced = trace(layer, seed[0], seed[1], 160);
           if (traced.length < 8) continue;
           const projected = traced.map(p => project(p[0], p[1], p[2]));
+          const trailHead = Math.floor(state.frame * 0.55 + streamIndex * 11) % (projected.length + 24);
+          const trailTail = trailHead - 22;
           for (let i = 0; i < projected.length - 1; i += 1) {
             const c = colorFor(traced[i][3]);
-            items.push({ depth: (projected[i][2] + projected[i + 1][2]) / 2, kind: "line", a: projected[i], b: projected[i + 1], color: `rgba(${c[0]},${c[1]},${c[2]},0.82)`, width: 2.0 });
+            const depth = (projected[i][2] + projected[i + 1][2]) / 2;
+            if (state.animateStreamTrails) {
+              items.push({ depth, kind: "line", a: projected[i], b: projected[i + 1], color: `rgba(${c[0]},${c[1]},${c[2]},0.20)`, width: 1.5 });
+              if (i >= trailTail && i <= trailHead) {
+                const fade = 1 - Math.abs(i - trailHead) / 22;
+                const alpha = 0.34 + 0.58 * Math.max(0, fade);
+                const width = 2.6 + 2.4 * Math.max(0, fade);
+                items.push({ depth: depth + 0.01, kind: "line", a: projected[i], b: projected[i + 1], color: `rgba(${c[0]},${c[1]},${c[2]},${alpha.toFixed(3)})`, width });
+              }
+            } else {
+              items.push({ depth, kind: "line", a: projected[i], b: projected[i + 1], color: `rgba(${c[0]},${c[1]},${c[2]},0.90)`, width: 3.1 });
+            }
           }
+          streamIndex += 1;
         }
       }
     }
@@ -457,6 +477,10 @@ HTML = r"""<!doctype html>
       document.getElementById("vectorDensity").addEventListener("input", event => { state.vectorDensity = Number(event.target.value); });
       document.getElementById("streamDensity").addEventListener("input", event => { state.streamDensity = Number(event.target.value); });
       document.getElementById("particleCount").addEventListener("input", event => { state.particleCount = Number(event.target.value); resetParticles(); });
+      document.getElementById("streamTrailToggle").addEventListener("click", event => {
+        state.animateStreamTrails = !state.animateStreamTrails;
+        event.target.textContent = state.animateStreamTrails ? "On" : "Off";
+      });
       document.getElementById("terrainToggle").addEventListener("click", event => {
         state.showTerrain = !state.showTerrain;
         event.target.textContent = state.showTerrain ? "Visible" : "Hidden";
