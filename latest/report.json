@@ -1,0 +1,52 @@
+﻿{
+    "version":  1,
+    "title":  "PondWind Latest Report",
+    "site_label":  "barton_pond2",
+    "race_time_local":  "2026-05-17T14:00:00-04:00",
+    "published_at_utc":  "2026-05-16T01:06:55.2543368Z",
+    "source_report_folder":  "20260517_1400_barton_pond2",
+    "products":  [
+                     {
+                         "title":  "Wind Speed Prediction",
+                         "category":  "Wind",
+                         "image":  "latest/images/product_1_wind_speed_prediction_knots.png",
+                         "file_name":  "product_1_wind_speed_prediction_knots.png"
+                     },
+                     {
+                         "title":  "Wind Speed Spread",
+                         "category":  "Wind",
+                         "image":  "latest/images/product_2_wind_speed_variance_knots.png",
+                         "file_name":  "product_2_wind_speed_variance_knots.png"
+                     },
+                     {
+                         "title":  "Wind Direction Spread",
+                         "category":  "Wind",
+                         "image":  "latest/images/product_3_wind_direction_variance_degrees.png",
+                         "file_name":  "product_3_wind_direction_variance_degrees.png"
+                     },
+                     {
+                         "title":  "Latest RGB Satellite",
+                         "category":  "Satellite",
+                         "image":  "latest/images/satellite_rgb_latest.png",
+                         "file_name":  "satellite_rgb_latest.png"
+                     },
+                     {
+                         "title":  "Surface Temperature",
+                         "category":  "Satellite",
+                         "image":  "latest/images/satellite_sst_latest.png",
+                         "file_name":  "satellite_sst_latest.png"
+                     },
+                     {
+                         "title":  "Estimated Chlorophyll-a",
+                         "category":  "Satellite",
+                         "image":  "latest/images/satellite_chla_estimated.png",
+                         "file_name":  "satellite_chla_estimated.png"
+                     },
+                     {
+                         "title":  "Estimated Turbidity",
+                         "category":  "Satellite",
+                         "image":  "latest/images/satellite_turbidity_estimated.png",
+                         "file_name":  "satellite_turbidity_estimated.png"
+                     }
+                 ]
+}
