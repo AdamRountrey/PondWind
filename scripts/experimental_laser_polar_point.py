@@ -274,6 +274,71 @@ def _best_vmg_pairs(samples: list[dict[str, float | str | None]], wind_from_deg:
     return upwind, downwind
 
 
+def _draw_arrow(
+    draw: ImageDraw.ImageDraw,
+    start: tuple[float, float],
+    end: tuple[float, float],
+    fill: tuple[int, int, int, int],
+    width: int,
+    head_len: float = 24.0,
+    head_width: float = 15.0,
+) -> None:
+    draw.line((start[0], start[1], end[0], end[1]), fill=fill, width=width)
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    length = math.hypot(dx, dy)
+    if length <= 0.0:
+        return
+    ux = dx / length
+    uy = dy / length
+    base = (end[0] - ux * head_len, end[1] - uy * head_len)
+    perp = (-uy, ux)
+    left = (base[0] + perp[0] * head_width * 0.5, base[1] + perp[1] * head_width * 0.5)
+    right = (base[0] - perp[0] * head_width * 0.5, base[1] - perp[1] * head_width * 0.5)
+    draw.polygon([end, left, right], fill=fill)
+
+
+def _draw_outlined_arrow(
+    draw: ImageDraw.ImageDraw,
+    start: tuple[float, float],
+    end: tuple[float, float],
+    fill: tuple[int, int, int, int],
+    width: int,
+    head_len: float = 30.0,
+    head_width: float = 24.0,
+) -> None:
+    _draw_arrow(draw, start, end, (255, 255, 255, 238), width + 8, head_len + 7.0, head_width + 10.0)
+    _draw_arrow(draw, start, end, (18, 27, 34, 210), width + 3, head_len + 3.0, head_width + 4.0)
+    _draw_arrow(draw, start, end, fill, width, head_len, head_width)
+
+
+def _draw_label(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[float, float],
+    text: str,
+    font: ImageFont.ImageFont,
+    fill: tuple[int, int, int],
+) -> None:
+    x, y = xy
+    bbox = draw.textbbox((x, y), text, font=font)
+    pad_x = 7
+    pad_y = 4
+    draw.rounded_rectangle(
+        (bbox[0] - pad_x, bbox[1] - pad_y, bbox[2] + pad_x, bbox[3] + pad_y),
+        radius=5,
+        fill=(255, 255, 255, 232),
+        outline=(*fill, 160),
+        width=1,
+    )
+    draw.text((x, y), text, fill=fill, font=font)
+
+
+def _draw_endpoint(draw: ImageDraw.ImageDraw, xy: tuple[float, float], fill: tuple[int, int, int, int]) -> None:
+    x, y = xy
+    draw.ellipse((x - 10, y - 10, x + 10, y + 10), fill=(255, 255, 255, 245), outline=(18, 27, 34, 220), width=2)
+    draw.ellipse((x - 6, y - 6, x + 6, y + 6), fill=fill)
+
+
 def _draw_polar(
     output_path: Path,
     samples: list[dict[str, float | str | None]],
@@ -290,9 +355,9 @@ def _draw_polar(
     image = Image.new("RGB", (size, size), (246, 248, 249))
     draw = ImageDraw.Draw(image, "RGBA")
     font = _font(18)
-    small_font = _font(15)
+    small_font = _font(17, bold=True)
     title_font = _font(22, bold=True)
-    label_font = _font(16, bold=True)
+    label_font = _font(18, bold=True)
     center = (size // 2, size // 2 + 28)
     plot_radius = 410
     finite_speeds = [float(s["boat_speed_knots"]) for s in samples if s["boat_speed_knots"] is not None]
@@ -305,14 +370,16 @@ def _draw_polar(
 
     for speed in np.linspace(scale_max / 4.0, scale_max, 4):
         r = plot_radius * speed / scale_max
-        draw.ellipse((center[0] - r, center[1] - r, center[0] + r, center[1] + r), outline=(146, 160, 168, 150), width=2)
+        draw.ellipse((center[0] - r, center[1] - r, center[0] + r, center[1] + r), outline=(96, 112, 122, 218), width=3)
         label_pos = _point_for_heading(center, 8.0, r)
-        draw.text((label_pos[0] + 8, label_pos[1] - 5), f"{speed:.1f} kt", fill=(70, 84, 92), font=small_font)
+        _draw_label(draw, (label_pos[0] + 8, label_pos[1] - 8), f"{speed:.1f} kt", small_font, (38, 50, 58))
     for heading in range(0, 360, 30):
         end = _point_for_heading(center, heading, plot_radius)
-        draw.line((center[0], center[1], end[0], end[1]), fill=(160, 172, 178, 105), width=2)
+        draw.line((center[0], center[1], end[0], end[1]), fill=(106, 120, 130, 185), width=3)
         label = _point_for_heading(center, heading, plot_radius + 28)
-        draw.text((label[0] - 13, label[1] - 9), f"{heading}", fill=(64, 78, 86), font=small_font)
+        text = f"{heading}"
+        bbox = draw.textbbox((0, 0), text, font=small_font)
+        draw.text((label[0] - (bbox[2] - bbox[0]) * 0.5, label[1] - (bbox[3] - bbox[1]) * 0.5), text, fill=(29, 42, 51), font=small_font)
 
     no_go = NO_GO_TWA_DEG
     wedge_points = [center]
@@ -341,6 +408,22 @@ def _draw_polar(
         color = _mode_color(str(sample["mode"]), float(sample["planing_probability"]))
         draw.line((a[0], a[1], b[0], b[1]), fill=(*color, 236), width=5)
 
+    finite_samples = [s for s in samples if s["boat_speed_knots"] is not None]
+    fastest = max(finite_samples, key=lambda s: float(s["boat_speed_knots"]))
+    upwind_pair, downwind_pair = _best_vmg_pairs(samples, wind_from_deg)
+    vmg_up_color = (0, 154, 87, 255)
+    vmg_down_color = (155, 67, 210, 255)
+    for sample in upwind_pair:
+        speed = float(sample["boat_speed_knots"])
+        end = _point_for_heading(center, float(sample["heading_deg"]), plot_radius * speed / scale_max)
+        _draw_outlined_arrow(draw, center, end, vmg_up_color, width=13, head_len=42.0, head_width=34.0)
+        _draw_endpoint(draw, end, vmg_up_color)
+    for sample in downwind_pair:
+        speed = float(sample["boat_speed_knots"])
+        end = _point_for_heading(center, float(sample["heading_deg"]), plot_radius * speed / scale_max)
+        _draw_outlined_arrow(draw, center, end, vmg_down_color, width=13, head_len=42.0, head_width=34.0)
+        _draw_endpoint(draw, end, vmg_down_color)
+
     wind_arrow_end = _point_for_heading(center, wind_from_deg, plot_radius * 0.92)
     draw.line((wind_arrow_end[0], wind_arrow_end[1], center[0], center[1]), fill=(20, 36, 44, 235), width=6)
     left = _point_for_heading(wind_arrow_end, wind_from_deg + 158, 22)
@@ -348,9 +431,6 @@ def _draw_polar(
     draw.polygon([wind_arrow_end, left, right], fill=(20, 36, 44, 230))
     draw.text((wind_arrow_end[0] + 12, wind_arrow_end[1] - 10), "wind from", fill=(20, 36, 44), font=label_font)
 
-    finite_samples = [s for s in samples if s["boat_speed_knots"] is not None]
-    fastest = max(finite_samples, key=lambda s: float(s["boat_speed_knots"]))
-    upwind_pair, downwind_pair = _best_vmg_pairs(samples, wind_from_deg)
     x0, y0 = 784, 822
     draw.rounded_rectangle((762, 790, 1164, 1114), radius=8, fill=(255, 255, 255, 236), outline=(186, 198, 206, 255), width=2)
     draw.text((x0, y0 - 20), "Point summary", fill=(24, 35, 42), font=label_font)
@@ -370,9 +450,9 @@ def _draw_polar(
         draw.text((x0, y_cursor), line, fill=(46, 61, 70), font=font)
         y_cursor += 24
     y_cursor += 10
-    draw.text((x0, y_cursor), "Blue: displacement", fill=(38, 132, 202), font=font)
-    draw.text((x0, y_cursor + 24), "Gold: transition", fill=(196, 139, 42), font=font)
-    draw.text((x0, y_cursor + 48), "Red: likely planing", fill=(190, 72, 58), font=font)
+    draw.text((x0, y_cursor), "Green velocity arrows: upwind VMG", fill=vmg_up_color[:3], font=font)
+    draw.text((x0, y_cursor + 24), "Purple velocity arrows: downwind VMG", fill=vmg_down_color[:3], font=font)
+    draw.text((x0, y_cursor + 48), "Blue/gold/red: hull to planing", fill=(38, 132, 202), font=font)
     draw.text((44, 1126), "Literature-informed prototype: Day 2017/Binns/Clark/Pennanen; relative estimate only.", fill=(70, 84, 92), font=font)
     draw.text((44, 1150), "Not calibrated to Barton GPS tracks, waves, current, trim, kinetics, or sailor skill.", fill=(70, 84, 92), font=font)
 
