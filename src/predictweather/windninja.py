@@ -738,11 +738,10 @@ def write_windninja_knots_vector_preview_from_arrays(
     rows, cols = speed_kts.shape
     top_margin = 80
     footer_lines = 1 if footer_text else 0
-    table_lines = 0 if not bottom_table_rows else (2 + len(bottom_table_rows))
     footer_band_height = 0
-    if footer_lines or table_lines:
-        footer_band_height = 28 + footer_lines * 22 + table_lines * 20
-    bottom_margin = (24 + footer_band_height) if footer_text else 24
+    if footer_lines:
+        footer_band_height = 28 + footer_lines * 22
+    bottom_margin = 24 + footer_band_height
     legend_width = 190
     if dem_basemap_tif is not None and dem_basemap_tif.exists():
         with rasterio.open(dem_basemap_tif) as src:
@@ -783,6 +782,7 @@ def write_windninja_knots_vector_preview_from_arrays(
     if footer_band_height:
         footer_top = canvas_height - footer_band_height
         canvas[footer_top:canvas_height, : map_width + legend_width] = 255
+    map_canvas = canvas[:map_height, :map_width]
 
     speed_min = float(valid.min())
     speed_max = float(valid.max())
@@ -840,9 +840,10 @@ def write_windninja_knots_vector_preview_from_arrays(
                     continue
                 speed_fraction = (float(vector_speed_final[row, col]) - speed_min) / speed_span
                 arrow_length = int(round((0.10 + 0.22 * speed_fraction) * pixel_stride * vector_scale))
-                arrow_length = max(6, arrow_length)
+                max_arrow_length = max(6, int(round(pixel_stride * 0.42)))
+                arrow_length = min(max(6, arrow_length), max_arrow_length)
                 head_length = _arrow_head_length(arrow_length, 1.4)
-                edge_margin = max(4, head_length + 2)
+                edge_margin = max(4, arrow_length + head_length + 2)
                 if (
                     col < edge_margin
                     or col >= (map_width - edge_margin)
@@ -851,7 +852,7 @@ def write_windninja_knots_vector_preview_from_arrays(
                 ):
                     continue
                 _draw_arrow(
-                    canvas,
+                    map_canvas,
                     col,
                     row,
                     float(vector_u_final[row, col]),
@@ -876,9 +877,10 @@ def write_windninja_knots_vector_preview_from_arrays(
                 cy = int(round((row + 0.5) * cell_height))
                 speed_fraction = (float(vector_speed_kts[row, col]) - speed_min) / speed_span
                 arrow_length = int(round((0.20 + 0.50 * speed_fraction) * min(cell_width, cell_height) * vector_scale))
-                arrow_length = max(6, arrow_length)
+                max_arrow_length = max(6, int(round(min(cell_width, cell_height) * 0.80)))
+                arrow_length = min(max(6, arrow_length), max_arrow_length)
                 _draw_arrow(
-                    canvas,
+                    map_canvas,
                     cx,
                     cy,
                     float(vector_u_mps[row, col]),
@@ -907,6 +909,31 @@ def write_windninja_knots_vector_preview_from_arrays(
             _draw_text(canvas, panel_left + 14, text_y, line, (0, 0, 0), scale=2)
             text_y += 24
 
+    if bottom_table_rows:
+        panel_width = 350
+        row_height = 20
+        panel_height = 58 + row_height * len(bottom_table_rows)
+        panel_left = 24
+        panel_bottom = map_height - 28
+        panel_right = min(map_width - 24, panel_left + panel_width)
+        panel_top = max(24, panel_bottom - panel_height)
+        _fill_rect(canvas, panel_left, panel_top, panel_right, panel_bottom, (245, 245, 245))
+        _draw_line(canvas, panel_left, panel_top, panel_right, panel_top, (20, 20, 20), thickness=1)
+        _draw_line(canvas, panel_right - 1, panel_top, panel_right - 1, panel_bottom, (20, 20, 20), thickness=1)
+        _draw_line(canvas, panel_left, panel_bottom - 1, panel_right, panel_bottom - 1, (20, 20, 20), thickness=1)
+        _draw_line(canvas, panel_left, panel_top, panel_left, panel_bottom, (20, 20, 20), thickness=1)
+        _draw_text(canvas, panel_left + 14, panel_top + 10, "models", (0, 0, 0), scale=2)
+        header_y = panel_top + 36
+        _draw_text(canvas, panel_left + 14, header_y, "model", (0, 0, 0), scale=2)
+        _draw_text(canvas, panel_left + 145, header_y, "wind kt", (0, 0, 0), scale=2)
+        _draw_text(canvas, panel_left + 250, header_y, "gust kt", (0, 0, 0), scale=2)
+        text_y = panel_top + 58
+        for row in bottom_table_rows:
+            _draw_text(canvas, panel_left + 14, text_y, row["model"], (0, 0, 0), scale=2)
+            _draw_text(canvas, panel_left + 145, text_y, row["wind"], (0, 0, 0), scale=2)
+            _draw_text(canvas, panel_left + 250, text_y, row["gust"], (0, 0, 0), scale=2)
+            text_y += row_height
+
     legend_left = map_width + 40
     available_legend_height = max(80, canvas_height - top_margin - bottom_margin)
     legend_height = min(available_legend_height, 900)
@@ -931,17 +958,6 @@ def write_windninja_knots_vector_preview_from_arrays(
         footer_y = canvas_height - footer_band_height + 10
         if footer_text:
             _draw_text(canvas, 24, footer_y, footer_text, (0, 0, 0), scale=2)
-            footer_y += 24
-        if bottom_table_rows:
-            _draw_text(canvas, 24, footer_y, "model", (0, 0, 0), scale=2)
-            _draw_text(canvas, 170, footer_y, "wind kt", (0, 0, 0), scale=2)
-            _draw_text(canvas, 262, footer_y, "gust kt", (0, 0, 0), scale=2)
-            footer_y += 22
-            for row in bottom_table_rows:
-                _draw_text(canvas, 24, footer_y, row["model"], (0, 0, 0), scale=2)
-                _draw_text(canvas, 170, footer_y, row["wind"], (0, 0, 0), scale=2)
-                _draw_text(canvas, 262, footer_y, row["gust"], (0, 0, 0), scale=2)
-                footer_y += 20
     return _write_png(preview_png, canvas)
 
 

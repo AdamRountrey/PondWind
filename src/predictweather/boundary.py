@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import cfgrib
@@ -228,7 +228,12 @@ def latest_hrdps_manifest(root: Path) -> Path:
     return manifests[-1][1]
 
 
-def load_cached_hrdps_manifest_for_valid_time(root: Path, target_valid_time_utc: datetime) -> tuple[dict, Path]:
+def load_cached_hrdps_manifest_for_valid_time(
+    root: Path,
+    target_valid_time_utc: datetime,
+    *,
+    max_valid_time_delta: timedelta = timedelta(minutes=0),
+) -> tuple[dict, Path]:
     target_valid_time_utc = target_valid_time_utc.astimezone(timezone.utc)
     candidates: list[tuple[dict, Path]] = []
     for manifest_path in sorted(root.rglob("manifest.json")):
@@ -237,10 +242,13 @@ def load_cached_hrdps_manifest_for_valid_time(root: Path, target_valid_time_utc:
             continue
         if not _manifest_is_complete(manifest):
             continue
+        selected_valid = _parse_iso_utc(manifest["selected_valid_at_utc"])
+        if abs(selected_valid - target_valid_time_utc) > max_valid_time_delta:
+            continue
         candidates.append((manifest, manifest_path))
 
     if not candidates:
-        raise FileNotFoundError(f"No usable HRDPS manifest found under {root}")
+        raise FileNotFoundError(f"No usable HRDPS manifest found under {root} for {target_valid_time_utc.isoformat()}")
 
     manifest, manifest_path = min(
         candidates,

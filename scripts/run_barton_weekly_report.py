@@ -88,6 +88,7 @@ MAX_WATER_SCENE_CLOUD_COVER = 70.0
 MAX_LANDSAT_SCENE_CLOUD_COVER = 80.0
 LANDSAT_SST_MAX_AGE_DAYS = 10.0
 MAX_PARALLEL_DOWNLOADS = 4
+MAX_PARALLEL_MODEL_DOWNLOADS = 2
 
 
 def _progress(progress_callback: Callable[[int, str], None] | None, percent: int, message: str) -> None:
@@ -249,14 +250,20 @@ def _load_hrdps_point_forecast(lat: float, lon: float, target_valid_time_utc: da
     }
 
     try:
-        hrdps_selection = download_hrdps_for_valid_time(DATA_RAW_DIR, target_valid_time_utc)
-        run_at_utc = hrdps_selection.run_at_utc
-        forecast_hour = hrdps_selection.forecast_hour
-        files = dict(hrdps_selection.files)
+        if acquisition_mode == "cached_hrdps" and boundary.get("manifest_path"):
+            cached_manifest = json.loads(Path(boundary["manifest_path"]).read_text(encoding="utf-8"))
+            run_at_utc = cached_manifest["run_at_utc"]
+            forecast_hour = int(cached_manifest["forecast_hour"])
+            files = dict(cached_manifest["files"])
+        else:
+            hrdps_selection = download_hrdps_for_valid_time(DATA_RAW_DIR, target_valid_time_utc)
+            run_at_utc = hrdps_selection.run_at_utc
+            forecast_hour = hrdps_selection.forecast_hour
+            files = dict(hrdps_selection.files)
         gust_result = try_download_hrdps_variable(
             DATA_RAW_DIR,
-            run_at_utc=datetime.fromisoformat(hrdps_selection.run_at_utc.replace("Z", "+00:00")),
-            forecast_hour=hrdps_selection.forecast_hour,
+            run_at_utc=datetime.fromisoformat(run_at_utc.replace("Z", "+00:00")),
+            forecast_hour=forecast_hour,
             variable_names=GUST_VARIABLE_CANDIDATES,
         )
         if gust_result is not None:
@@ -310,7 +317,7 @@ def _load_model_point_forecasts(lat: float, lon: float, target_valid_time_utc: d
         ("icon", lambda: sample_icon_point_forecast(download_icon_for_valid_time(DATA_RAW_DIR, target_valid_time_utc), lat, lon, "fresh_icon")),
         ("ecmwf", lambda: sample_ecmwf_point_forecast(download_ecmwf_for_valid_time(DATA_RAW_DIR, target_valid_time_utc), lat, lon, "fresh_ecmwf")),
     ]
-    for loader_name, result, exc in _run_ordered_tasks(loaders):
+    for loader_name, result, exc in _run_ordered_tasks(loaders, max_workers=MAX_PARALLEL_MODEL_DOWNLOADS):
         if exc is not None:
             errors[loader_name] = repr(exc)
         elif result is not None:
@@ -525,6 +532,16 @@ def _footer_timestamp_text(timestamp: datetime, prefix: str) -> str:
 
 def _report_dir_name(race_time_local: datetime, site: SiteConfig) -> str:
     return f"{race_time_local.strftime('%Y%m%d_%H%M')}_{site.slug()}"
+
+
+def _clean_report_outputs(report_dir: Path) -> list[str]:
+    removed: list[str] = []
+    for pattern in ("product_*.png", "satellite_*.png", "weekly_report.md", "report_manifest.json"):
+        for path in sorted(report_dir.glob(pattern)):
+            if path.is_file():
+                path.unlink()
+                removed.append(str(path))
+    return removed
 
 
 def _resolve_report_root(report_output_dir: str | Path | None) -> Path:
@@ -1044,6 +1061,25 @@ def _build_wind_products(
         lat=site.center_lat,
         lon=site.center_lon,
     )
+    available_sources = sorted({str(forecast.get("source", "")) for forecast in model_forecasts if forecast.get("source")})
+    expected_sources = {"ecmwf", "gfs", "hrrr", "hrdps", "icon", "nam"}
+    missing_sources = sorted(expected_sources - set(available_sources))
+    wind_warnings: list[str] = []
+    if model_errors:
+        wind_warnings.append(
+            "Some deterministic model downloads failed: "
+            + ", ".join(f"{source} ({error})" for source, error in sorted(model_errors.items()))
+        )
+    if len(available_sources) < 4:
+        wind_warnings.append(
+            f"Deterministic boundary is based on only {len(available_sources)} model(s): {', '.join(available_sources) or 'none'}."
+        )
+    if missing_sources:
+        wind_warnings.append("Missing deterministic sources: " + ", ".join(missing_sources) + ".")
+    if any(str(forecast.get("acquisition_mode", "")).startswith("cached") for forecast in model_forecasts):
+        wind_warnings.append("One or more deterministic model inputs came from a local cache for the exact requested valid time.")
+    if gefs_mode != "fresh_gefs":
+        wind_warnings.append(f"GEFS spread inputs came from local cache mode `{gefs_mode}`.")
     consensus = choose_consensus_boundary(
         [
             build_model_point_forecast(
@@ -1455,6 +1491,10 @@ def _build_wind_products(
         "solve_dem_tif": str(domain.solve_dem_tif),
         "boundary_target_time_utc": boundary_target_time_utc.isoformat(),
         "mesh_resolution_m": mesh_resolution_m,
+        "available_model_sources": available_sources,
+        "missing_model_sources": missing_sources,
+        "degraded": bool(wind_warnings),
+        "warnings": wind_warnings,
         "member_count": len(member_records),
         "members": member_records,
         "product_1": str(product1_png),
@@ -1727,6 +1767,8 @@ def _write_markdown_report(report_dir: Path, race_time_local: datetime, site: Si
         f"- Wind variance products are single-time GEFS sigma-spread maps downscaled with `{wind['wind_solver_display']}`.",
         f"- Wind data mode for this run: `{wind['wind_data_mode']}`.",
     ]
+    if wind.get("warnings"):
+        note_lines.extend(f"- Wind acquisition warning: {warning}" for warning in wind["warnings"])
     if satellite_options["chla"]:
         note_lines.append("- Chlorophyll-a is an estimated satellite retrieval from Sentinel-2 red/red-edge reflectance, not an in situ measurement.")
     if satellite_options["turbidity"]:
@@ -1851,6 +1893,7 @@ def build_weekly_report(
     report_root = _resolve_report_root(report_output_dir)
     report_dir = report_root / _report_dir_name(race_time_local, site)
     report_dir.mkdir(parents=True, exist_ok=True)
+    removed_previous_outputs = _clean_report_outputs(report_dir)
     temp_dir = report_dir / "report_temp"
     temp_dir.mkdir(parents=True, exist_ok=True)
     _progress(progress_callback, 8, "Preparing terrain domain...")
@@ -1881,6 +1924,7 @@ def build_weekly_report(
         },
         "race_time_local": race_time_local.isoformat(),
         "race_time_utc": race_time_utc.isoformat(),
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "report_dir": str(report_dir),
         "report_root": str(report_root),
         "report_markdown": str(report_path),
@@ -1911,6 +1955,7 @@ def build_weekly_report(
             "mode": "retain_in_report_temp",
             "report_temp_dir": str(temp_dir),
             "note": "Intermediate files are retained in report_temp for easier reruns and manual deletion.",
+            "removed_previous_outputs": removed_previous_outputs,
             "moved_paths": moved_intermediates,
         },
         "wind": wind_summary,

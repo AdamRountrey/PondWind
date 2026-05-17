@@ -5,10 +5,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.request import urlopen
 
 from predictweather.boundary import build_model_point_forecast, sample_boundary_wind_at_site, sample_scalar_field_at_site
-from predictweather.http import download_url_to_file, env_allows_insecure_ssl
+from predictweather.http import download_url_to_file, env_allows_insecure_ssl, fetch_text, url_exists
 
 
 RUN_HOURS_UTC = (0, 6, 12, 18)
@@ -52,7 +51,8 @@ def _base_name(run_at_utc: datetime, forecast_hour: int) -> str:
 
 
 def stream_for_run(run_at_utc: datetime) -> str:
-    return "oper" if run_at_utc.hour in {0, 12} else "scda"
+    # ECMWF IFS Cycle 50r1 moved the 06/18 open-data runs into the oper stream.
+    return "oper"
 
 
 def build_grib_url(run_at_utc: datetime, forecast_hour: int) -> str:
@@ -75,16 +75,16 @@ def _parse_index_lines(text: str) -> list[dict]:
 
 
 def _fetch_text(url: str) -> str:
-    with urlopen(url, timeout=120) as response:
-        return response.read().decode("utf-8", errors="replace")
+    return fetch_text(url, allow_insecure=env_allows_insecure_ssl())
 
 
 def _url_exists(url: str) -> bool:
     try:
-        with urlopen(url, timeout=60) as response:
-            return response.status == 200
-    except HTTPError:
-        return False
+        return url_exists(url, allow_insecure=env_allows_insecure_ssl())
+    except HTTPError as exc:
+        if exc.code == 404:
+            return False
+        raise
 
 
 def _resolve_length(entries: list[dict], index: int) -> int:

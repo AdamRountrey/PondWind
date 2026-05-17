@@ -2,15 +2,25 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 
 from predictweather.http import download_url_to_file, env_allows_insecure_ssl, url_exists
 
 
-def site_subregion(lat: float, lon: float, padding_deg: float = 0.45) -> dict[str, float]:
+def _lon_360(lon: float) -> float:
+    return lon % 360.0
+
+
+def site_subregion(lat: float, lon: float, padding_deg: float = 0.45, *, lon_360: bool = False) -> dict[str, float]:
+    leftlon = lon - padding_deg
+    rightlon = lon + padding_deg
+    if lon_360:
+        leftlon = _lon_360(leftlon)
+        rightlon = _lon_360(rightlon)
     return {
-        "leftlon": lon - padding_deg,
-        "rightlon": lon + padding_deg,
+        "leftlon": leftlon,
+        "rightlon": rightlon,
         "toplat": lat + padding_deg,
         "bottomlat": lat - padding_deg,
     }
@@ -46,8 +56,9 @@ def nomads_filter_url(
     level_flag: str,
     lat: float,
     lon: float,
+    lon_360: bool = False,
 ) -> str:
-    region = site_subregion(lat, lon)
+    region = site_subregion(lat, lon, lon_360=lon_360)
     query = {
         "file": file_name,
         level_flag: "on",
@@ -72,6 +83,7 @@ def download_nomads_subset(
     lat: float,
     lon: float,
     destination: Path,
+    lon_360: bool = False,
 ) -> Path:
     url = nomads_filter_url(
         filter_script=filter_script,
@@ -81,6 +93,7 @@ def download_nomads_subset(
         level_flag=level_flag,
         lat=lat,
         lon=lon,
+        lon_360=lon_360,
     )
     return download_url_to_file(url, destination, allow_insecure=env_allows_insecure_ssl())
 
@@ -94,6 +107,7 @@ def nomads_subset_exists(
     level_flag: str,
     lat: float,
     lon: float,
+    lon_360: bool = False,
 ) -> bool:
     url = nomads_filter_url(
         filter_script=filter_script,
@@ -103,5 +117,11 @@ def nomads_subset_exists(
         level_flag=level_flag,
         lat=lat,
         lon=lon,
+        lon_360=lon_360,
     )
-    return url_exists(url, allow_insecure=env_allows_insecure_ssl())
+    try:
+        return url_exists(url, allow_insecure=env_allows_insecure_ssl())
+    except HTTPError as exc:
+        if exc.code == 404:
+            return False
+        raise

@@ -124,8 +124,20 @@ def _run_report_worker(argv: list[str]) -> int:
         )
         _emit_worker_event("log", text=f"Report written: {report_path}\n")
         _emit_worker_event("log", text=f"Manifest written: {manifest_path}\n")
+        try:
+            manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+            wind = manifest.get("wind", {})
+            for warning in wind.get("warnings", []) or []:
+                _emit_worker_event("log", text=f"Wind acquisition warning: {warning}\n")
+            done_message = (
+                "Report build completed with wind acquisition warnings."
+                if wind.get("degraded")
+                else "Report build completed successfully."
+            )
+        except Exception:
+            done_message = "Report build completed successfully."
         _emit_worker_event("report_path", path=str(report_path))
-        _emit_worker_event("done", message="Report build completed successfully.")
+        _emit_worker_event("done", message=done_message)
         return 0
     except Exception as exc:
         error_root = _runtime_project_root()
