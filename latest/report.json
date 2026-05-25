@@ -3,73 +3,84 @@
     "title":  "PondWind Latest Report",
     "site_label":  "barton_pond",
     "race_time_local":  "2026-05-25T14:00:00-04:00",
-    "published_at_utc":  "2026-05-25T14:56:23.7749938Z",
+    "published_at_utc":  "2026-05-25T15:12:10.4097582Z",
     "source_report_folder":  "20260525_1400_barton_pond",
     "products":  [
                      {
                          "title":  "Wind Speed Prediction",
                          "category":  "Wind",
                          "image":  "latest/images/product_1_wind_speed_prediction_knots.png",
+                         "thumbnail":  "latest/thumbs/product_1_wind_speed_prediction_knots.jpg",
                          "file_name":  "product_1_wind_speed_prediction_knots.png"
                      },
                      {
                          "title":  "Wind Speed Spread",
                          "category":  "Wind",
                          "image":  "latest/images/product_2_wind_speed_variance_knots.png",
+                         "thumbnail":  "latest/thumbs/product_2_wind_speed_variance_knots.jpg",
                          "file_name":  "product_2_wind_speed_variance_knots.png"
                      },
                      {
                          "title":  "Wind Direction Spread",
                          "category":  "Wind",
                          "image":  "latest/images/product_3_wind_direction_variance_degrees.png",
+                         "thumbnail":  "latest/thumbs/product_3_wind_direction_variance_degrees.jpg",
                          "file_name":  "product_3_wind_direction_variance_degrees.png"
                      },
                      {
                          "title":  "Experimental CFD Comparison",
                          "category":  "Experimental CFD",
                          "image":  "latest/images/product_4_openfoam_experimental_cfd_knots.png",
+                         "thumbnail":  "latest/thumbs/product_4_openfoam_experimental_cfd_knots.jpg",
                          "file_name":  "product_4_openfoam_experimental_cfd_knots.png"
                      },
                      {
                          "title":  "Experimental CFD Turbulence Intensity",
                          "category":  "Experimental CFD",
                          "image":  "latest/images/product_5_openfoam_turbulence_intensity_percent.png",
+                         "thumbnail":  "latest/thumbs/product_5_openfoam_turbulence_intensity_percent.jpg",
                          "file_name":  "product_5_openfoam_turbulence_intensity_percent.png"
                      },
                      {
                          "title":  "Sailing Polar Overlay",
                          "category":  "Sailing",
                          "image":  "latest/images/product_6_sailing_polar_dem_overlay.png",
+                         "thumbnail":  "latest/thumbs/product_6_sailing_polar_dem_overlay.jpg",
                          "file_name":  "product_6_sailing_polar_dem_overlay.png"
                      },
                      {
                          "title":  "Experimental CFD Sailing Polar Overlay",
                          "category":  "Sailing",
                          "image":  "latest/images/product_7_openfoam_sailing_polar_dem_overlay.png",
+                         "thumbnail":  "latest/thumbs/product_7_openfoam_sailing_polar_dem_overlay.jpg",
                          "file_name":  "product_7_openfoam_sailing_polar_dem_overlay.png"
                      },
                      {
                          "title":  "Latest RGB Satellite",
                          "category":  "Satellite",
                          "image":  "latest/images/satellite_rgb_latest.png",
+                         "thumbnail":  "latest/thumbs/satellite_rgb_latest.jpg",
                          "file_name":  "satellite_rgb_latest.png"
                      },
                      {
                          "title":  "Surface Temperature",
                          "category":  "Satellite",
                          "image":  "latest/images/satellite_sst_latest.png",
+                         "thumbnail":  "latest/thumbs/satellite_sst_latest.jpg",
                          "file_name":  "satellite_sst_latest.png"
                      },
                      {
                          "title":  "Estimated Chlorophyll-a",
                          "category":  "Satellite",
                          "image":  "latest/images/satellite_chla_estimated.png",
+                         "thumbnail":  "latest/thumbs/satellite_chla_estimated.jpg",
                          "file_name":  "satellite_chla_estimated.png"
                      },
                      {
                          "title":  "Estimated Turbidity",
                          "category":  "Satellite",
                          "image":  "latest/images/satellite_turbidity_estimated.png",
+                         "thumbnail":  "latest/thumbs/satellite_turbidity_estimated.jpg",
                          "file_name":  "satellite_turbidity_estimated.png"
                      }
                  ]
