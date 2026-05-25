@@ -154,8 +154,47 @@ function Add-ProductIfPresent {
         title = $Title
         category = $Category
         image = "latest/images/$FileName"
+        thumbnail = "latest/thumbs/$([System.IO.Path]::GetFileNameWithoutExtension($FileName)).jpg"
         file_name = $FileName
     }) | Out-Null
+}
+
+function New-ReadmeThumbnail {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourcePath,
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationPath,
+        [int]$MaxWidth = 900,
+        [int]$JpegQuality = 82
+    )
+    Add-Type -AssemblyName System.Drawing
+    $image = $null
+    $bitmap = $null
+    $graphics = $null
+    try {
+        $image = [System.Drawing.Image]::FromFile($SourcePath)
+        $scale = [Math]::Min(1.0, $MaxWidth / [double]$image.Width)
+        $width = [Math]::Max(1, [int][Math]::Round($image.Width * $scale))
+        $height = [Math]::Max(1, [int][Math]::Round($image.Height * $scale))
+        $bitmap = New-Object System.Drawing.Bitmap($width, $height)
+        $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+        $graphics.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
+        $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+        $graphics.DrawImage($image, 0, 0, $width, $height)
+        $codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() |
+            Where-Object { $_.MimeType -eq "image/jpeg" } |
+            Select-Object -First 1
+        $qualityEncoder = [System.Drawing.Imaging.Encoder]::Quality
+        $encoderParameters = New-Object System.Drawing.Imaging.EncoderParameters(1)
+        $encoderParameters.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter($qualityEncoder, [int64]$JpegQuality)
+        $bitmap.Save($DestinationPath, $codec, $encoderParameters)
+    } finally {
+        if ($null -ne $graphics) { $graphics.Dispose() }
+        if ($null -ne $bitmap) { $bitmap.Dispose() }
+        if ($null -ne $image) { $image.Dispose() }
+    }
 }
 
 $reportDirectory = Resolve-ReportDirectory
@@ -168,10 +207,12 @@ if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
 $pagesRoot = Ensure-PagesWorktree -TargetPath $WorktreePath
 $latestDir = Join-Path $pagesRoot "latest"
 $imageDir = Join-Path $latestDir "images"
+$thumbDir = Join-Path $latestDir "thumbs"
 if (Test-Path -LiteralPath $latestDir) {
     Remove-Item -LiteralPath $latestDir -Recurse -Force
 }
 New-Item -ItemType Directory -Path $imageDir | Out-Null
+New-Item -ItemType Directory -Path $thumbDir | Out-Null
 
 $products = [System.Collections.ArrayList]::new()
 Add-ProductIfPresent $products $reportDirectory "product_1_wind_speed_prediction_knots.png" "Wind Speed Prediction" "Wind"
@@ -191,7 +232,9 @@ if ($products.Count -eq 0) {
 }
 
 foreach ($product in $products) {
-    Copy-Item -LiteralPath (Join-Path $reportDirectory.FullName $product.file_name) -Destination (Join-Path $imageDir $product.file_name) -Force
+    $sourceImage = Join-Path $reportDirectory.FullName $product.file_name
+    Copy-Item -LiteralPath $sourceImage -Destination (Join-Path $imageDir $product.file_name) -Force
+    New-ReadmeThumbnail -SourcePath $sourceImage -DestinationPath (Join-Path $pagesRoot $product.thumbnail)
 }
 
 $siteLabel = ConvertTo-SafeSiteLabel -Manifest $manifest -ReportDirectory $reportDirectory
