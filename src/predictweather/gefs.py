@@ -10,6 +10,7 @@ from urllib.error import HTTPError, URLError
 import cfgrib
 import numpy as np
 
+from predictweather.grib_lock import GRIB_DECODE_LOCK
 from predictweather.http import download_url_to_file, env_allows_insecure_ssl, url_exists
 
 GEFS_BASE_URL = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/gens/prod"
@@ -172,18 +173,22 @@ def download_gefs_mean_and_spread(destination_dir: Path, valid_at_utc: datetime)
 
 
 def _open_component(path: Path, variable_name: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, str]:
-    dataset = cfgrib.open_dataset(
-        path,
-        indexpath="",
-        filter_by_keys={
-            "typeOfLevel": "heightAboveGround",
-            "level": 10,
-        },
-    )
-    values = dataset[variable_name].values.astype("float32")
-    latitudes = dataset["latitude"].values.astype("float64")
-    longitudes = dataset["longitude"].values.astype("float64")
-    valid_time = np.datetime_as_string(dataset["valid_time"].values, unit="s")
+    with GRIB_DECODE_LOCK:
+        dataset = cfgrib.open_dataset(
+            path,
+            indexpath="",
+            filter_by_keys={
+                "typeOfLevel": "heightAboveGround",
+                "level": 10,
+            },
+        )
+        try:
+            values = dataset[variable_name].values.astype("float32")
+            latitudes = dataset["latitude"].values.astype("float64")
+            longitudes = dataset["longitude"].values.astype("float64")
+            valid_time = np.datetime_as_string(dataset["valid_time"].values, unit="s")
+        finally:
+            dataset.close()
     return values, latitudes, longitudes, valid_time
 
 

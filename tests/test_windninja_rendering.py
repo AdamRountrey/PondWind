@@ -16,6 +16,55 @@ from predictweather.windninja import (
 
 
 class WindNinjaRenderingTests(unittest.TestCase):
+    def test_zero_wind_preview_renders_without_vectors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            basemap = tmp / "dem_preview.tif"
+            preview = tmp / "calm.png"
+            map_size = 120
+            dem = np.full((map_size, map_size), 160, dtype=np.uint8)
+            with rasterio.open(
+                basemap,
+                "w",
+                driver="GTiff",
+                width=map_size,
+                height=map_size,
+                count=1,
+                dtype="uint8",
+                crs="EPSG:26917",
+                transform=from_origin(0.0, float(map_size), 1.0, 1.0),
+            ) as dst:
+                dst.write(dem, 1)
+
+            source_rows = source_cols = 12
+            zeros = np.zeros((source_rows, source_cols), dtype=np.float32)
+            source_header = {
+                "ncols": float(source_cols),
+                "nrows": float(source_rows),
+                "xllcorner": 0.0,
+                "yllcorner": 0.0,
+                "cellsize": 10.0,
+                "nodata_value": -9999.0,
+            }
+
+            write_windninja_knots_vector_preview_from_arrays(
+                speed_mps=zeros,
+                u_mps=zeros,
+                v_mps=zeros,
+                preview_png=preview,
+                dem_basemap_tif=basemap,
+                source_header=source_header,
+                vector_stride=3,
+                vector_scale=2.2,
+                colormap=diverging_blue_green_red_colormap(),
+                center_value=0.0,
+                footer_text="calm diagnostic",
+            )
+
+            self.assertTrue(preview.exists())
+            image = np.array(Image.open(preview).convert("RGB"))
+            self.assertGreater(image.size, 0)
+
     def test_near_cardinal_vectors_do_not_make_full_height_columns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_name:
             tmp = Path(tmp_name)

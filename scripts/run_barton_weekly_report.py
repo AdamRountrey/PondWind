@@ -70,6 +70,7 @@ from predictweather.windninja import (
     write_array_to_geotiff_from_header,
     write_reprojected_array_like_reference,
     write_scalar_diagnostic_preview,
+    write_windninja_knots_vector_preview_from_arrays,
     write_windninja_knots_vector_preview_from_speed_angle,
     diverging_blue_green_red_colormap,
 )
@@ -89,6 +90,7 @@ MAX_LANDSAT_SCENE_CLOUD_COVER = 80.0
 LANDSAT_SST_MAX_AGE_DAYS = 10.0
 MAX_PARALLEL_DOWNLOADS = 4
 MAX_PARALLEL_MODEL_DOWNLOADS = 2
+CALM_WIND_SOLVER_THRESHOLD_MPS = 0.2
 
 
 def _progress(progress_callback: Callable[[int, str], None] | None, percent: int, message: str) -> None:
@@ -908,6 +910,26 @@ def _transform_from_aaigrid_header(header: dict[str, float]):
     )
 
 
+def _wind_grid_template_from_raster(reference_tif: Path) -> tuple[dict[str, float], tuple[int, int]]:
+    with rasterio.open(reference_tif) as src:
+        transform = src.transform
+        cell_width = float(abs(transform.a))
+        cell_height = float(abs(transform.e))
+        if cell_width <= 0.0 or cell_height <= 0.0:
+            raise ValueError(f"Invalid wind grid transform for {reference_tif}: {transform}")
+        if abs(cell_width - cell_height) > max(cell_width, cell_height) * 0.01:
+            raise ValueError(f"Wind grid cells must be square for AAIGrid-style rendering: {transform}")
+        header = {
+            "ncols": float(src.width),
+            "nrows": float(src.height),
+            "xllcorner": float(transform.c),
+            "yllcorner": float(transform.f + src.height * transform.e),
+            "cellsize": cell_width,
+            "nodata_value": -9999.0,
+        }
+        return header, (int(src.height), int(src.width))
+
+
 def _water_mask_for_wind_grid(landscape_tif: Path, source_header: dict[str, float]) -> np.ndarray | None:
     try:
         height = int(source_header["nrows"])
@@ -963,6 +985,37 @@ def _array_finite_summary(name: str, field: np.ndarray) -> dict:
         "max": float(valid.max()),
         "mean": float(valid.mean()),
     }
+
+
+def _model_spread_summary_from_forecasts(model_forecasts: list[dict]) -> tuple[float, float]:
+    speed_values_mps: list[float] = []
+    direction_values_deg: list[float] = []
+    for forecast in model_forecasts:
+        try:
+            speed = float(forecast["wind_speed_mps"])
+            direction = float(forecast["wind_from_direction_deg"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not math.isfinite(speed) or speed < 0.0:
+            continue
+        speed_values_mps.append(speed)
+        if speed >= CALM_WIND_SOLVER_THRESHOLD_MPS and math.isfinite(direction):
+            direction_values_deg.append(direction % 360.0)
+
+    if len(speed_values_mps) >= 2:
+        speed_std_kts = float(np.std(np.asarray(speed_values_mps, dtype=np.float32)) * 1.94384449)
+    else:
+        speed_std_kts = 0.0
+
+    if len(direction_values_deg) >= 2:
+        direction_rad = np.deg2rad(np.asarray(direction_values_deg, dtype=np.float32))
+        resultant = float(math.hypot(float(np.mean(np.sin(direction_rad))), float(np.mean(np.cos(direction_rad)))))
+        resultant = max(1.0e-6, min(1.0, resultant))
+        direction_std_deg = float(math.degrees(math.sqrt(-2.0 * math.log(resultant))))
+    else:
+        direction_std_deg = 0.0
+
+    return speed_std_kts, direction_std_deg
 
 
 def _write_sailing_polar_overlay_product(
@@ -1109,39 +1162,6 @@ def _build_wind_products(
     openfoam_comparison: dict | None = None
     enable_openfoam_comparison = wind_solver == "openfoam"
 
-    def run_windninja_solver(output_dir: Path, wind_speed_mps: float, wind_direction_deg: float) -> dict:
-        cli_path = windninja_cli_path(RUNTIME_RESOURCE_ROOT)
-        run = run_windninja_domain_average(
-            cli_path=cli_path,
-            elevation_tif=wind_input_tif,
-            output_dir=output_dir,
-            wind_speed_mps=wind_speed_mps,
-            wind_direction_deg=wind_direction_deg,
-            mesh_resolution_m=mesh_resolution_m,
-            momentum=True,
-            iterations=300,
-            turbulence_output=False,
-            num_threads=1,
-        )
-        return {"solver": "windninja", "solver_mode": "momentum", **run}
-
-    solver_display = "WindNinja momentum"
-    _progress(progress_callback, 32, "Running production terrain wind prediction with WindNinja...")
-    deterministic_run = run_windninja_solver(
-        output_dir=deterministic_dir,
-        wind_speed_mps=float(boundary["wind_speed_mps"]),
-        wind_direction_deg=float(boundary["wind_from_direction_deg"]),
-    )
-    solver_metadata.append({"role": "deterministic", **deterministic_run})
-    ascii_paths = expected_windninja_ascii_paths(
-        elevation_tif=wind_input_tif,
-        wind_speed_mps=float(boundary["wind_speed_mps"]),
-        wind_direction_deg=float(boundary["wind_from_direction_deg"]),
-        mesh_resolution_m=mesh_resolution_m,
-        output_dir=deterministic_dir,
-    )
-    speed_mps, speed_header = _read_aaigrid(ascii_paths["speed"])
-    speed_kts = speed_mps * 1.94384449
     weather_inset: dict | None = None
     inset_lines: list[str] | None = None
     try:
@@ -1193,6 +1213,215 @@ def _build_wind_products(
         ]
     )
 
+    def run_windninja_solver(output_dir: Path, wind_speed_mps: float, wind_direction_deg: float) -> dict:
+        cli_path = windninja_cli_path(RUNTIME_RESOURCE_ROOT)
+        run = run_windninja_domain_average(
+            cli_path=cli_path,
+            elevation_tif=wind_input_tif,
+            output_dir=output_dir,
+            wind_speed_mps=wind_speed_mps,
+            wind_direction_deg=wind_direction_deg,
+            mesh_resolution_m=mesh_resolution_m,
+            momentum=True,
+            iterations=300,
+            turbulence_output=False,
+            num_threads=1,
+        )
+        return {"solver": "windninja", "solver_mode": "momentum", **run}
+
+    boundary_speed_mps = float(boundary["wind_speed_mps"])
+    boundary_direction_deg = float(boundary["wind_from_direction_deg"])
+    if not math.isfinite(boundary_direction_deg):
+        boundary_direction_deg = 0.0
+    if not math.isfinite(boundary_speed_mps) or boundary_speed_mps < CALM_WIND_SOLVER_THRESHOLD_MPS:
+        _progress(progress_callback, 32, "Rendering calm wind products...")
+        deterministic_dir.mkdir(parents=True, exist_ok=True)
+        speed_header, grid_shape = _wind_grid_template_from_raster(wind_input_tif)
+        speed_mps = np.zeros(grid_shape, dtype=np.float32)
+        speed_kts = np.zeros(grid_shape, dtype=np.float32)
+        direction_deg = np.full(grid_shape, boundary_direction_deg % 360.0, dtype=np.float32)
+        u_mps = np.zeros(grid_shape, dtype=np.float32)
+        v_mps = np.zeros(grid_shape, dtype=np.float32)
+        product1_png = report_dir / "product_1_wind_speed_prediction_knots.png"
+        write_windninja_knots_vector_preview_from_arrays(
+            speed_mps=speed_mps,
+            u_mps=u_mps,
+            v_mps=v_mps,
+            preview_png=product1_png,
+            dem_basemap_tif=domain.dem_preview_tif,
+            source_header=speed_header,
+            vector_stride=4,
+            vector_scale=2.2,
+            colormap=diverging_blue_green_red_colormap(),
+            center_value=0.0,
+            title="calm",
+            units="knots",
+            footer_text=(
+                f"{_footer_timestamp_text(boundary_target_time_utc, 'wind forecast')} | "
+                f"terrain solvers skipped below {CALM_WIND_SOLVER_THRESHOLD_MPS:.1f} m/s"
+            ),
+            inset_lines=inset_lines,
+            bottom_table_rows=bottom_table_rows,
+        )
+
+        sailing_polar_png = report_dir / "product_6_sailing_polar_dem_overlay.png"
+        _write_unavailable_panel(
+            sailing_polar_png,
+            title="sail",
+            line1="Sailing polar skipped",
+            line2=f"Calm boundary wind below {CALM_WIND_SOLVER_THRESHOLD_MPS:.1f} m/s.",
+        )
+        sailing_polar = {
+            "enabled": True,
+            "status": "skipped",
+            "product_png": str(sailing_polar_png),
+            "wind_source": "calm_direct",
+            "reason": f"Boundary wind below {CALM_WIND_SOLVER_THRESHOLD_MPS:.1f} m/s.",
+        }
+
+        model_speed_std_kts, model_direction_std_deg = _model_spread_summary_from_forecasts(model_forecasts)
+        speed_std_kts = np.full(grid_shape, model_speed_std_kts, dtype=np.float32)
+        direction_std_deg = np.full(grid_shape, model_direction_std_deg, dtype=np.float32)
+        solve_speed_std_tif = temp_dir / "wind_speed_variance_knots_solve.tif"
+        solve_direction_std_tif = temp_dir / "wind_direction_variance_degrees_solve.tif"
+        speed_std_tif = temp_dir / "wind_speed_variance_knots.tif"
+        direction_std_tif = temp_dir / "wind_direction_variance_degrees.tif"
+        write_array_to_geotiff_from_header(speed_header, speed_std_kts, solve_speed_std_tif)
+        write_array_to_geotiff_from_header(speed_header, direction_std_deg, solve_direction_std_tif)
+        write_reprojected_array_like_reference(
+            speed_std_kts,
+            source_header=speed_header,
+            reference_tif=domain.clipped_dem_tif,
+            destination_tif=speed_std_tif,
+            resampling=Resampling.bilinear,
+        )
+        write_reprojected_array_like_reference(
+            direction_std_deg,
+            source_header=speed_header,
+            reference_tif=domain.clipped_dem_tif,
+            destination_tif=direction_std_tif,
+            resampling=Resampling.bilinear,
+        )
+
+        product2_png = report_dir / "product_2_wind_speed_variance_knots.png"
+        product3_png = report_dir / "product_3_wind_direction_variance_degrees.png"
+        _progress(progress_callback, 58, "Rendering calm wind maps...")
+        colormap = diverging_blue_green_red_colormap()
+        write_scalar_diagnostic_preview(
+            field=speed_std_kts,
+            dem_basemap_tif=domain.dem_preview_tif,
+            output_png=product2_png,
+            title="sd wind",
+            units="knots",
+            colormap=colormap,
+            source_header=speed_header,
+            alpha=0.58,
+            signed=False,
+            center_value=model_speed_std_kts,
+            footer_text=_footer_timestamp_text(boundary_target_time_utc, "model wind speed spread"),
+        )
+        write_scalar_diagnostic_preview(
+            field=direction_std_deg,
+            dem_basemap_tif=domain.dem_preview_tif,
+            output_png=product3_png,
+            title="sd az",
+            units="deg",
+            colormap=colormap,
+            source_header=speed_header,
+            alpha=0.58,
+            signed=False,
+            center_value=model_direction_std_deg,
+            footer_text=_footer_timestamp_text(boundary_target_time_utc, "model wind dir spread"),
+        )
+
+        if enable_openfoam_comparison:
+            openfoam_png = report_dir / "product_4_openfoam_experimental_cfd_knots.png"
+            _write_unavailable_panel(
+                openfoam_png,
+                title="cfd exp",
+                line1="OpenFOAM CFD skipped",
+                line2=f"Calm boundary wind below {CALM_WIND_SOLVER_THRESHOLD_MPS:.1f} m/s.",
+            )
+            openfoam_comparison = {
+                "enabled": True,
+                "status": "skipped",
+                "product_png": str(openfoam_png),
+                "reason": f"Boundary wind below {CALM_WIND_SOLVER_THRESHOLD_MPS:.1f} m/s.",
+            }
+
+        wind_warnings.append(
+            f"Consensus boundary wind was {boundary_speed_mps:.2f} m/s; terrain solvers were skipped below "
+            f"{CALM_WIND_SOLVER_THRESHOLD_MPS:.1f} m/s and calm products were rendered directly."
+        )
+        solver_metadata.append(
+            {
+                "role": "deterministic",
+                "solver": "calm_direct",
+                "solver_mode": "calm_guard",
+                "status": "skipped",
+                "threshold_mps": CALM_WIND_SOLVER_THRESHOLD_MPS,
+                "boundary_wind_speed_mps": boundary_speed_mps,
+                "boundary_wind_from_direction_deg": boundary_direction_deg,
+                "grid_shape": [int(grid_shape[0]), int(grid_shape[1])],
+            }
+        )
+        return {
+            "boundary": boundary,
+            "boundary_consensus": consensus.as_dict(),
+            "model_forecasts": model_forecasts,
+            "model_errors": model_errors,
+            "skill_adjustments": skill_adjustments,
+            "skill_metadata": skill_metadata,
+            "gefs_boundary": sampled_gefs,
+            "wind_data_mode": wind_note,
+            "requested_wind_solver": wind_solver,
+            "wind_solver": "calm_direct",
+            "wind_solver_display": "Calm direct render",
+            "openfoam_comparison": openfoam_comparison
+            if openfoam_comparison is not None
+            else {
+                "enabled": False,
+                "status": "not_requested",
+            },
+            "solver_runs": solver_metadata,
+            "wind_input_tif": str(wind_input_tif),
+            "final_dem_tif": str(domain.clipped_dem_tif),
+            "solve_dem_tif": str(domain.solve_dem_tif),
+            "boundary_target_time_utc": boundary_target_time_utc.isoformat(),
+            "mesh_resolution_m": mesh_resolution_m,
+            "available_model_sources": available_sources,
+            "missing_model_sources": missing_sources,
+            "degraded": True,
+            "warnings": wind_warnings,
+            "member_count": 0,
+            "members": [],
+            "product_1": str(product1_png),
+            "product_2": str(product2_png),
+            "product_3": str(product3_png),
+            "sailing_polar_overlay": sailing_polar,
+            "speed_std_knots_mean": float(np.nanmean(speed_std_kts)),
+            "direction_std_deg_mean": float(np.nanmean(direction_std_deg)),
+            "weather_inset": weather_inset,
+        }
+
+    solver_display = "WindNinja momentum"
+    _progress(progress_callback, 32, "Running production terrain wind prediction with WindNinja...")
+    deterministic_run = run_windninja_solver(
+        output_dir=deterministic_dir,
+        wind_speed_mps=boundary_speed_mps,
+        wind_direction_deg=boundary_direction_deg,
+    )
+    solver_metadata.append({"role": "deterministic", **deterministic_run})
+    ascii_paths = expected_windninja_ascii_paths(
+        elevation_tif=wind_input_tif,
+        wind_speed_mps=boundary_speed_mps,
+        wind_direction_deg=boundary_direction_deg,
+        mesh_resolution_m=mesh_resolution_m,
+        output_dir=deterministic_dir,
+    )
+    speed_mps, speed_header = _read_aaigrid(ascii_paths["speed"])
+    speed_kts = speed_mps * 1.94384449
+
     product1_png = report_dir / "product_1_wind_speed_prediction_knots.png"
     write_windninja_knots_vector_preview_from_speed_angle(
         ascii_paths["speed"],
@@ -1224,7 +1453,7 @@ def _build_wind_products(
         openfoam_turbulence_png = report_dir / "product_5_openfoam_turbulence_intensity_percent.png"
         openfoam_sailing_polar_png = report_dir / "product_7_openfoam_sailing_polar_dem_overlay.png"
         openfoam_dir = wind_root / "openfoam_comparison"
-        _progress(progress_callback, 40, "Checking experimental OpenFOAM CFD availability...")
+        _progress(progress_callback, 40, "Running experimental OpenFOAM CFD comparison...")
         try:
             openfoam_run = run_openfoam_domain_average(
                 elevation_tif=wind_input_tif,
@@ -1336,6 +1565,8 @@ def _build_wind_products(
                 "error": _openfoam_error_payload(exc),
             }
 
+    deterministic_speed_header = speed_header
+    deterministic_grid_shape = speed_mps.shape
     ensemble_dir = wind_root / "gefs_sigma"
     ensemble_dir.mkdir(parents=True, exist_ok=True)
     _progress(progress_callback, 45, "Estimating WindNinja wind variability...")
@@ -1347,22 +1578,40 @@ def _build_wind_products(
         member_u = float(sampled_gefs["mean_u10_mps"]) + sigma_u * float(sampled_gefs["spread_u10_mps"])
         member_v = float(sampled_gefs["mean_v10_mps"]) + sigma_v * float(sampled_gefs["spread_v10_mps"])
         member_speed_mps, member_direction_deg = _uv_to_speed_dir(member_u, member_v)
+        member_direction_safe_deg = member_direction_deg if math.isfinite(member_direction_deg) else 0.0
         member_dir = ensemble_dir / f"member_{index:02d}"
-        member_run = run_windninja_solver(
-            output_dir=member_dir,
-            wind_speed_mps=member_speed_mps,
-            wind_direction_deg=member_direction_deg,
-        )
-        solver_metadata.append({"role": f"member_{index:02d}", **member_run})
-        member_ascii = expected_windninja_ascii_paths(
-            elevation_tif=wind_input_tif,
-            wind_speed_mps=member_speed_mps,
-            wind_direction_deg=member_direction_deg,
-            mesh_resolution_m=mesh_resolution_m,
-            output_dir=member_dir,
-        )
-        speed_grid, member_header = _read_aaigrid(member_ascii["speed"])
-        direction_grid_deg, _ = _read_aaigrid(member_ascii["direction"])
+        member_ascii: dict[str, Path] | None = None
+        if not math.isfinite(member_speed_mps) or member_speed_mps < CALM_WIND_SOLVER_THRESHOLD_MPS:
+            speed_grid = np.zeros(deterministic_grid_shape, dtype=np.float32)
+            direction_grid_deg = np.full(deterministic_grid_shape, member_direction_safe_deg % 360.0, dtype=np.float32)
+            member_header = deterministic_speed_header
+            solver_metadata.append(
+                {
+                    "role": f"member_{index:02d}",
+                    "solver": "calm_direct",
+                    "solver_mode": "calm_guard",
+                    "status": "skipped",
+                    "threshold_mps": CALM_WIND_SOLVER_THRESHOLD_MPS,
+                    "wind_speed_mps": member_speed_mps,
+                    "wind_from_direction_deg": member_direction_safe_deg,
+                }
+            )
+        else:
+            member_run = run_windninja_solver(
+                output_dir=member_dir,
+                wind_speed_mps=member_speed_mps,
+                wind_direction_deg=member_direction_deg,
+            )
+            solver_metadata.append({"role": f"member_{index:02d}", **member_run})
+            member_ascii = expected_windninja_ascii_paths(
+                elevation_tif=wind_input_tif,
+                wind_speed_mps=member_speed_mps,
+                wind_direction_deg=member_direction_deg,
+                mesh_resolution_m=mesh_resolution_m,
+                output_dir=member_dir,
+            )
+            speed_grid, member_header = _read_aaigrid(member_ascii["speed"])
+            direction_grid_deg, _ = _read_aaigrid(member_ascii["direction"])
         speed_finite_cells = int(np.isfinite(speed_grid).sum())
         direction_finite_cells = int(np.isfinite(direction_grid_deg).sum())
         if speed_header is None:
@@ -1375,11 +1624,12 @@ def _build_wind_products(
                 "scenario": label,
                 "wind_speed_mps": member_speed_mps,
                 "wind_speed_kts": member_speed_mps * 1.94384449,
-                "wind_from_direction_deg": member_direction_deg,
+                "wind_from_direction_deg": member_direction_safe_deg,
                 "speed_finite_cells": speed_finite_cells,
                 "direction_finite_cells": direction_finite_cells,
-                "speed_output": str(member_ascii["speed"]),
-                "direction_output": str(member_ascii["direction"]),
+                "speed_output": None if member_ascii is None else str(member_ascii["speed"]),
+                "direction_output": None if member_ascii is None else str(member_ascii["direction"]),
+                "status": "skipped_calm" if member_ascii is None else "completed",
             }
         )
 

@@ -308,6 +308,9 @@ class PredictWeatherGui:
             env["PYTHONUNBUFFERED"] = "1"
             saw_terminal_message = False
             self.output_queue.put(("progress", "1|Launching report worker..."))
+            popen_kwargs = {}
+            if os.name == "nt":
+                popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             self.worker_process = subprocess.Popen(
                 worker_command,
                 stdout=subprocess.PIPE,
@@ -318,6 +321,7 @@ class PredictWeatherGui:
                 errors="replace",
                 bufsize=1,
                 env=env,
+                **popen_kwargs,
             )
             if self.worker_process.stdout is not None:
                 for raw_line in self.worker_process.stdout:

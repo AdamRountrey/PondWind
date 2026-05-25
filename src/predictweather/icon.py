@@ -12,6 +12,7 @@ import eccodes
 import numpy as np
 
 from predictweather.boundary import build_model_point_forecast
+from predictweather.grib_lock import GRIB_DECODE_LOCK
 from predictweather.http import download_url_to_file, env_allows_insecure_ssl, fetch_text, url_exists
 
 
@@ -92,12 +93,13 @@ def _download_icon_invariant_field(destination_dir: Path, field_dir: str, field_
 
 
 def _read_icon_values(path: Path) -> np.ndarray:
-    with path.open("rb") as handle:
-        gid = eccodes.codes_grib_new_from_file(handle)
-        try:
-            values = eccodes.codes_get_array(gid, "values").astype(np.float64)
-        finally:
-            eccodes.codes_release(gid)
+    with GRIB_DECODE_LOCK:
+        with path.open("rb") as handle:
+            gid = eccodes.codes_grib_new_from_file(handle)
+            try:
+                values = eccodes.codes_get_array(gid, "values").astype(np.float64)
+            finally:
+                eccodes.codes_release(gid)
     return values
 
 

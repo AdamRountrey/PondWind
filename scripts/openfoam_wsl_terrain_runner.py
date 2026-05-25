@@ -86,12 +86,17 @@ def _wsl_shell_command(command: str) -> str:
 
 
 def _run_wsl_status(command: str, timeout_seconds: int = 1800) -> tuple[int, str]:
+    run_kwargs = {
+        "check": False,
+        "capture_output": True,
+        "text": True,
+        "timeout": timeout_seconds,
+    }
+    if os.name == "nt":
+        run_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     completed = subprocess.run(
         ["wsl", "bash", "-lc", _wsl_shell_command(command)],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=timeout_seconds,
+        **run_kwargs,
     )
     return int(completed.returncode), (completed.stdout or "") + (completed.stderr or "")
 

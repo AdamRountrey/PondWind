@@ -10,6 +10,7 @@ import numpy as np
 
 from predictweather.forecast_models import ModelPointForecast
 from predictweather.forecast_models import vector_to_speed_direction
+from predictweather.grib_lock import GRIB_DECODE_LOCK
 
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -29,26 +30,30 @@ def _open_dataset_variable(
     *,
     filter_by_keys: dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, str]:
-    dataset = cfgrib.open_dataset(
-        path,
-        indexpath="",
-        filter_by_keys=filter_by_keys
-        or {
-            "typeOfLevel": "heightAboveGround",
-            "level": 10,
-        },
-    )
-    data_vars = [name for name in dataset.data_vars.keys()]
-    if variable_name is None:
-        if not data_vars:
-            raise KeyError(f"No data variables found in {path}")
-        variable_name = data_vars[0]
-    elif variable_name not in data_vars and len(data_vars) == 1:
-        variable_name = data_vars[0]
-    values = dataset[variable_name].values.astype("float32")
-    latitudes = dataset["latitude"].values.astype("float64")
-    longitudes = dataset["longitude"].values.astype("float64")
-    valid_time = np.datetime_as_string(dataset["valid_time"].values, unit="s")
+    with GRIB_DECODE_LOCK:
+        dataset = cfgrib.open_dataset(
+            path,
+            indexpath="",
+            filter_by_keys=filter_by_keys
+            or {
+                "typeOfLevel": "heightAboveGround",
+                "level": 10,
+            },
+        )
+        try:
+            data_vars = [name for name in dataset.data_vars.keys()]
+            if variable_name is None:
+                if not data_vars:
+                    raise KeyError(f"No data variables found in {path}")
+                variable_name = data_vars[0]
+            elif variable_name not in data_vars and len(data_vars) == 1:
+                variable_name = data_vars[0]
+            values = dataset[variable_name].values.astype("float32")
+            latitudes = dataset["latitude"].values.astype("float64")
+            longitudes = dataset["longitude"].values.astype("float64")
+            valid_time = np.datetime_as_string(dataset["valid_time"].values, unit="s")
+        finally:
+            dataset.close()
     return values, latitudes, longitudes, valid_time
 
 
