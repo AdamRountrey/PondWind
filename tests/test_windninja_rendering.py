@@ -129,6 +129,35 @@ class WindNinjaRenderingTests(unittest.TestCase):
 
             self.assertLess(int(column_black_counts.max()), int(image.shape[0] * 0.75))
 
+    def test_direction_uncertainty_whiskers_render_with_arrowheads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            preview = tmp / "whiskers.png"
+            source_rows = source_cols = 16
+            speed_mps = np.full((source_rows, source_cols), 5.0, dtype=np.float32)
+            u_mps = np.full_like(speed_mps, 5.0)
+            v_mps = np.zeros_like(speed_mps)
+            direction_uncertainty_deg = np.full_like(speed_mps, 30.0)
+
+            write_windninja_knots_vector_preview_from_arrays(
+                speed_mps=speed_mps,
+                u_mps=u_mps,
+                v_mps=v_mps,
+                preview_png=preview,
+                vector_stride=4,
+                vector_scale=2.2,
+                colormap=diverging_blue_green_red_colormap(),
+                center_value=float(np.mean(speed_mps * 1.94384449)),
+                direction_uncertainty_deg=direction_uncertainty_deg,
+                direction_uncertainty_color=(255, 0, 255),
+                direction_uncertainty_alpha=1.0,
+                direction_uncertainty_stride_multiplier=1,
+            )
+
+            image = np.array(Image.open(preview).convert("RGB"))
+            magenta = (image[:, :, 0] > 240) & (image[:, :, 1] < 20) & (image[:, :, 2] > 240)
+            self.assertGreater(int(magenta.sum()), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

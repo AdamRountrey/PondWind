@@ -1655,6 +1655,25 @@ def _build_wind_products(
     if speed_header is None:
         raise RuntimeError("GEFS sigma ensemble did not produce any members.")
 
+    write_windninja_knots_vector_preview_from_speed_angle(
+        ascii_paths["speed"],
+        ascii_paths["direction"],
+        product1_png,
+        dem_basemap_tif=domain.dem_preview_tif,
+        source_header=deterministic_speed_header,
+        vector_stride=4,
+        vector_scale=2.2,
+        colormap=diverging_blue_green_red_colormap(),
+        center_value=float(np.nanmean(speed_kts)),
+        title="wind",
+        units="knots",
+        footer_text=f"{_footer_timestamp_text(boundary_target_time_utc, 'wind forecast')} | faint whiskers show GEFS dir SD",
+        inset_lines=inset_lines,
+        direction_uncertainty_deg=direction_std_deg,
+        direction_uncertainty_stride_multiplier=1,
+        bottom_table_rows=bottom_table_rows,
+    )
+
     solve_speed_std_tif = temp_dir / "wind_speed_variance_knots_solve.tif"
     solve_direction_std_tif = temp_dir / "wind_direction_variance_degrees_solve.tif"
     speed_std_tif = temp_dir / "wind_speed_variance_knots.tif"

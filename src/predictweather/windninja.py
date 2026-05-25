@@ -357,7 +357,18 @@ def expected_windninja_ascii_paths(
     }
 
 
-def _draw_line(image: np.ndarray, x0: int, y0: int, x1: int, y1: int, color: tuple[int, int, int], thickness: int = 1) -> None:
+def _draw_line(
+    image: np.ndarray,
+    x0: int,
+    y0: int,
+    x1: int,
+    y1: int,
+    color: tuple[int, int, int],
+    thickness: int = 1,
+    alpha: float = 1.0,
+) -> None:
+    color_array = np.asarray(color, dtype=np.float32)
+    blend_alpha = float(np.clip(alpha, 0.0, 1.0))
     steps = max(abs(x1 - x0), abs(y1 - y0), 1)
     for step in range(steps + 1):
         t = step / steps
@@ -367,7 +378,15 @@ def _draw_line(image: np.ndarray, x0: int, y0: int, x1: int, y1: int, color: tup
         y_end = min(image.shape[0], y + thickness + 1)
         x_start = max(0, x - thickness)
         x_end = min(image.shape[1], x + thickness + 1)
-        image[y_start:y_end, x_start:x_end] = color
+        if blend_alpha >= 1.0:
+            image[y_start:y_end, x_start:x_end] = color
+        elif blend_alpha > 0.0:
+            patch = image[y_start:y_end, x_start:x_end].astype(np.float32)
+            image[y_start:y_end, x_start:x_end] = np.clip(
+                patch * (1.0 - blend_alpha) + color_array * blend_alpha,
+                0,
+                255,
+            ).astype(np.uint8)
 
 
 def _fill_rect(image: np.ndarray, x0: int, y0: int, x1: int, y1: int, color: tuple[int, int, int]) -> None:
@@ -390,6 +409,7 @@ def _draw_arrow(
     color: tuple[int, int, int],
     thickness: int = 1,
     head_scale: float = 1.0,
+    alpha: float = 1.0,
 ) -> None:
     magnitude = float(np.hypot(flow_u, flow_v))
     if magnitude <= 0.0 or not np.isfinite(magnitude):
@@ -399,7 +419,7 @@ def _draw_arrow(
     unit_y = -flow_v / magnitude
     end_x = int(round(center_x + unit_x * length))
     end_y = int(round(center_y + unit_y * length))
-    _draw_line(image, center_x, center_y, end_x, end_y, color, thickness=thickness)
+    _draw_line(image, center_x, center_y, end_x, end_y, color, thickness=thickness, alpha=alpha)
 
     head_length = max(4, int(round((length / 3.0) * head_scale)))
     angle = np.deg2rad(25.0)
@@ -419,6 +439,7 @@ def _draw_arrow(
         int(round(end_y + left_y * head_length)),
         color,
         thickness=thickness,
+        alpha=alpha,
     )
     _draw_line(
         image,
@@ -428,7 +449,48 @@ def _draw_arrow(
         int(round(end_y + right_y * head_length)),
         color,
         thickness=thickness,
+        alpha=alpha,
     )
+
+
+def _rotated_vector(flow_u: float, flow_v: float, delta_deg: float) -> tuple[float, float]:
+    angle = float(np.deg2rad(delta_deg))
+    cos_a = float(np.cos(angle))
+    sin_a = float(np.sin(angle))
+    return (flow_u * cos_a - flow_v * sin_a, flow_u * sin_a + flow_v * cos_a)
+
+
+def _draw_direction_uncertainty_whiskers(
+    image: np.ndarray,
+    center_x: int,
+    center_y: int,
+    flow_u: float,
+    flow_v: float,
+    spread_deg: float,
+    length: int,
+    color: tuple[int, int, int],
+    min_deg: float = 5.0,
+    max_deg: float = 60.0,
+    alpha: float = 0.30,
+) -> None:
+    if not np.isfinite(spread_deg) or spread_deg < min_deg:
+        return
+    spread = min(float(spread_deg), max_deg)
+    whisker_length = max(5, int(round(length * 0.78)))
+    for delta in (-spread, spread):
+        whisker_u, whisker_v = _rotated_vector(flow_u, flow_v, delta)
+        _draw_arrow(
+            image,
+            center_x,
+            center_y,
+            whisker_u,
+            whisker_v,
+            whisker_length,
+            color,
+            thickness=1,
+            head_scale=0.75,
+            alpha=alpha,
+        )
 
 
 def _arrow_head_length(length: int, head_scale: float) -> int:
@@ -651,6 +713,12 @@ def write_windninja_knots_vector_preview_from_speed_angle(
     units: str = "knots",
     footer_text: str | None = None,
     inset_lines: list[str] | None = None,
+    direction_uncertainty_deg: np.ndarray | None = None,
+    direction_uncertainty_min_deg: float = 5.0,
+    direction_uncertainty_max_deg: float = 60.0,
+    direction_uncertainty_stride_multiplier: int = 2,
+    direction_uncertainty_color: tuple[int, int, int] = (40, 40, 40),
+    direction_uncertainty_alpha: float = 0.30,
     bottom_table_rows: list[dict[str, str]] | None = None,
 ) -> Path:
     speed_mps, speed_header = _read_aaigrid(speed_asc)
@@ -675,6 +743,12 @@ def write_windninja_knots_vector_preview_from_speed_angle(
         units=units,
         footer_text=footer_text,
         inset_lines=inset_lines,
+        direction_uncertainty_deg=direction_uncertainty_deg,
+        direction_uncertainty_min_deg=direction_uncertainty_min_deg,
+        direction_uncertainty_max_deg=direction_uncertainty_max_deg,
+        direction_uncertainty_stride_multiplier=direction_uncertainty_stride_multiplier,
+        direction_uncertainty_color=direction_uncertainty_color,
+        direction_uncertainty_alpha=direction_uncertainty_alpha,
         bottom_table_rows=bottom_table_rows,
     )
 
@@ -694,6 +768,12 @@ def write_windninja_knots_vector_preview_from_arrays(
     units: str = "knots",
     footer_text: str | None = None,
     inset_lines: list[str] | None = None,
+    direction_uncertainty_deg: np.ndarray | None = None,
+    direction_uncertainty_min_deg: float = 5.0,
+    direction_uncertainty_max_deg: float = 60.0,
+    direction_uncertainty_stride_multiplier: int = 2,
+    direction_uncertainty_color: tuple[int, int, int] = (40, 40, 40),
+    direction_uncertainty_alpha: float = 0.30,
     edge_trim_cells: int = 1,
     bottom_table_rows: list[dict[str, str]] | None = None,
 ) -> Path:
@@ -702,6 +782,7 @@ def write_windninja_knots_vector_preview_from_arrays(
     vector_speed_kts = speed_kts
     vector_u_mps = u_mps
     vector_v_mps = v_mps
+    vector_direction_uncertainty_deg = direction_uncertainty_deg
     if edge_trim_cells > 0 and speed_kts.shape[0] > (2 * edge_trim_cells + 2) and speed_kts.shape[1] > (2 * edge_trim_cells + 2):
         vector_speed_kts = speed_kts.copy()
         vector_speed_kts[:edge_trim_cells, :] = np.nan
@@ -718,6 +799,12 @@ def write_windninja_knots_vector_preview_from_arrays(
         vector_v_mps[-edge_trim_cells:, :] = np.nan
         vector_v_mps[:, :edge_trim_cells] = np.nan
         vector_v_mps[:, -edge_trim_cells:] = np.nan
+        if direction_uncertainty_deg is not None:
+            vector_direction_uncertainty_deg = direction_uncertainty_deg.copy()
+            vector_direction_uncertainty_deg[:edge_trim_cells, :] = np.nan
+            vector_direction_uncertainty_deg[-edge_trim_cells:, :] = np.nan
+            vector_direction_uncertainty_deg[:, :edge_trim_cells] = np.nan
+            vector_direction_uncertainty_deg[:, -edge_trim_cells:] = np.nan
 
     valid = speed_kts[np.isfinite(speed_kts)]
     if valid.size == 0:
@@ -830,14 +917,32 @@ def write_windninja_knots_vector_preview_from_arrays(
                 basemap_tif=dem_basemap_tif,
                 resampling=Resampling.nearest,
             )
+        direction_uncertainty_final = None
+        if vector_direction_uncertainty_deg is not None:
+            direction_uncertainty_final, _, _ = _reproject_array_to_basemap(
+                vector_direction_uncertainty_deg.astype(np.float32),
+                source_header=source_header,
+                basemap_tif=dem_basemap_tif,
+                resampling=Resampling.bilinear,
+            )
+            if np.isfinite(vector_direction_uncertainty_deg).any() and not np.isfinite(direction_uncertainty_final).any():
+                direction_uncertainty_final, _, _ = _reproject_array_to_basemap(
+                    vector_direction_uncertainty_deg.astype(np.float32),
+                    source_header=source_header,
+                    basemap_tif=dem_basemap_tif,
+                    resampling=Resampling.nearest,
+                )
         pixel_stride = max(8, int(round((source_cell / base_cell_for_arrow) * max(1, int(vector_stride)))))
         row_start = pixel_stride // 2
         col_base = pixel_stride // 2
+        uncertainty_stride_multiplier = max(1, int(direction_uncertainty_stride_multiplier))
         for row in range(row_start, map_height, pixel_stride):
+            arrow_grid_row = (row - row_start) // pixel_stride
             col_offset = (pixel_stride // 2) if ((row - row_start) // pixel_stride) % 2 == 1 else 0
             for col in range(col_base + col_offset, map_width, pixel_stride):
                 if not np.isfinite(vector_speed_final[row, col]):
                     continue
+                arrow_grid_col = max(0, (col - (col_base + col_offset)) // pixel_stride)
                 speed_fraction = (float(vector_speed_final[row, col]) - speed_min) / speed_span
                 arrow_length = int(round((0.10 + 0.22 * speed_fraction) * pixel_stride * vector_scale))
                 max_arrow_length = max(6, int(round(pixel_stride * 0.42)))
@@ -851,6 +956,23 @@ def write_windninja_knots_vector_preview_from_arrays(
                     or row >= (map_height - edge_margin)
                 ):
                     continue
+                if (
+                    direction_uncertainty_final is not None
+                    and (arrow_grid_row + arrow_grid_col) % uncertainty_stride_multiplier == 0
+                ):
+                    _draw_direction_uncertainty_whiskers(
+                        map_canvas,
+                        col,
+                        row,
+                        float(vector_u_final[row, col]),
+                        float(vector_v_final[row, col]),
+                        float(direction_uncertainty_final[row, col]),
+                        arrow_length,
+                        direction_uncertainty_color,
+                        min_deg=direction_uncertainty_min_deg,
+                        max_deg=direction_uncertainty_max_deg,
+                        alpha=direction_uncertainty_alpha,
+                    )
                 _draw_arrow(
                     map_canvas,
                     col,
@@ -868,17 +990,37 @@ def write_windninja_knots_vector_preview_from_arrays(
         col_base = stride // 2
         cell_height = map_height / rows
         cell_width = map_width / cols
+        uncertainty_stride_multiplier = max(1, int(direction_uncertainty_stride_multiplier))
         for row in range(row_start, rows, stride):
+            arrow_grid_row = (row - row_start) // stride
             col_offset = (stride // 2) if ((row - row_start) // stride) % 2 == 1 else 0
             for col in range(col_base + col_offset, cols, stride):
                 if not np.isfinite(vector_speed_kts[row, col]):
                     continue
+                arrow_grid_col = max(0, (col - (col_base + col_offset)) // stride)
                 cx = int(round((col + 0.5) * cell_width))
                 cy = int(round((row + 0.5) * cell_height))
                 speed_fraction = (float(vector_speed_kts[row, col]) - speed_min) / speed_span
                 arrow_length = int(round((0.20 + 0.50 * speed_fraction) * min(cell_width, cell_height) * vector_scale))
                 max_arrow_length = max(6, int(round(min(cell_width, cell_height) * 0.80)))
                 arrow_length = min(max(6, arrow_length), max_arrow_length)
+                if (
+                    vector_direction_uncertainty_deg is not None
+                    and (arrow_grid_row + arrow_grid_col) % uncertainty_stride_multiplier == 0
+                ):
+                    _draw_direction_uncertainty_whiskers(
+                        map_canvas,
+                        cx,
+                        cy,
+                        float(vector_u_mps[row, col]),
+                        float(vector_v_mps[row, col]),
+                        float(vector_direction_uncertainty_deg[row, col]),
+                        arrow_length,
+                        direction_uncertainty_color,
+                        min_deg=direction_uncertainty_min_deg,
+                        max_deg=direction_uncertainty_max_deg,
+                        alpha=direction_uncertainty_alpha,
+                    )
                 _draw_arrow(
                     map_canvas,
                     cx,
