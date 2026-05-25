@@ -2,6 +2,18 @@
 
 PondWind builds race-day wind and satellite reports for a user-selected square area. It combines terrain-aware WindNinja downscaling with multi-model forecast consensus and nearby observation skill weighting.
 
+## Latest report preview
+
+The public dashboard shows the latest published PondWind report:
+
+- [`adamrountrey.github.io/PondWind`](https://adamrountrey.github.io/PondWind/)
+
+These preview images are pulled from the same GitHub Pages report folder:
+
+| Wind speed prediction | Wind speed spread | Wind direction spread |
+| --- | --- | --- |
+| [![Latest wind speed prediction](https://adamrountrey.github.io/PondWind/latest/images/product_1_wind_speed_prediction_knots.png)](https://adamrountrey.github.io/PondWind/) | [![Latest wind speed spread](https://adamrountrey.github.io/PondWind/latest/images/product_2_wind_speed_variance_knots.png)](https://adamrountrey.github.io/PondWind/) | [![Latest wind direction spread](https://adamrountrey.github.io/PondWind/latest/images/product_3_wind_direction_variance_degrees.png)](https://adamrountrey.github.io/PondWind/) |
+
 ## Current capabilities
 
 - User-selected site center and area size
