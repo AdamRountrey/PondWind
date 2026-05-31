@@ -216,16 +216,16 @@ New-Item -ItemType Directory -Path $thumbDir | Out-Null
 
 $products = [System.Collections.ArrayList]::new()
 Add-ProductIfPresent $products $reportDirectory "product_1_wind_speed_prediction_knots.png" "Wind Speed Prediction" "Wind"
-Add-ProductIfPresent $products $reportDirectory "product_2_wind_speed_variance_knots.png" "Wind Speed Spread" "Wind"
-Add-ProductIfPresent $products $reportDirectory "product_3_wind_direction_variance_degrees.png" "Wind Direction Spread" "Wind"
-Add-ProductIfPresent $products $reportDirectory "product_4_openfoam_experimental_cfd_knots.png" "Experimental CFD Comparison" "Experimental CFD"
+Add-ProductIfPresent $products $reportDirectory "product_2_wind_speed_variance_knots.png" "Wind Speed Ensemble SD" "Wind"
+Add-ProductIfPresent $products $reportDirectory "product_3_wind_direction_variance_degrees.png" "Wind Direction Ensemble SD" "Wind"
+Add-ProductIfPresent $products $reportDirectory "product_4_openfoam_experimental_cfd_knots.png" "Experimental CFD/Adapter Comparison" "Experimental CFD"
 Add-ProductIfPresent $products $reportDirectory "product_5_openfoam_turbulence_intensity_percent.png" "Experimental CFD Turbulence Intensity" "Experimental CFD"
-Add-ProductIfPresent $products $reportDirectory "product_6_sailing_polar_dem_overlay.png" "Sailing Polar Overlay" "Sailing"
-Add-ProductIfPresent $products $reportDirectory "product_7_openfoam_sailing_polar_dem_overlay.png" "Experimental CFD Sailing Polar Overlay" "Sailing"
+Add-ProductIfPresent $products $reportDirectory "product_6_sailing_polar_dem_overlay.png" "Experimental ILCA Relative Polar" "Sailing"
+Add-ProductIfPresent $products $reportDirectory "product_7_openfoam_sailing_polar_dem_overlay.png" "Experimental CFD Relative Polar" "Sailing"
 Add-ProductIfPresent $products $reportDirectory "satellite_rgb_latest.png" "Latest RGB Satellite" "Satellite"
-Add-ProductIfPresent $products $reportDirectory "satellite_sst_latest.png" "Surface Temperature" "Satellite"
-Add-ProductIfPresent $products $reportDirectory "satellite_chla_estimated.png" "Estimated Chlorophyll-a" "Satellite"
-Add-ProductIfPresent $products $reportDirectory "satellite_turbidity_estimated.png" "Estimated Turbidity" "Satellite"
+Add-ProductIfPresent $products $reportDirectory "satellite_sst_latest.png" "Surface Temperature Over Water" "Satellite"
+Add-ProductIfPresent $products $reportDirectory "satellite_chla_estimated.png" "Experimental Chlorophyll-a Index" "Satellite"
+Add-ProductIfPresent $products $reportDirectory "satellite_turbidity_estimated.png" "Experimental Turbidity Index" "Satellite"
 
 if ($products.Count -eq 0) {
     throw "No whitelisted report images were found in $($reportDirectory.FullName)"

@@ -15,10 +15,10 @@ These preview images are pulled from the same GitHub Pages report folder.
     <img src="https://adamrountrey.github.io/PondWind/latest/thumbs/product_1_wind_speed_prediction_knots.jpg?v=readme-20260525" alt="Latest wind speed prediction" width="31%">
   </a>
   <a href="https://adamrountrey.github.io/PondWind/">
-    <img src="https://adamrountrey.github.io/PondWind/latest/thumbs/product_2_wind_speed_variance_knots.jpg?v=readme-20260525" alt="Latest wind speed spread" width="31%">
+    <img src="https://adamrountrey.github.io/PondWind/latest/thumbs/product_2_wind_speed_variance_knots.jpg?v=readme-20260525" alt="Latest wind speed ensemble standard deviation" width="31%">
   </a>
   <a href="https://adamrountrey.github.io/PondWind/">
-    <img src="https://adamrountrey.github.io/PondWind/latest/thumbs/product_3_wind_direction_variance_degrees.jpg?v=readme-20260525" alt="Latest wind direction spread" width="31%">
+    <img src="https://adamrountrey.github.io/PondWind/latest/thumbs/product_3_wind_direction_variance_degrees.jpg?v=readme-20260525" alt="Latest wind direction ensemble standard deviation" width="31%">
   </a>
 </p>
 
@@ -36,13 +36,13 @@ These preview images are pulled from the same GitHub Pages report folder.
   - `NAM`
   - `ICON`
   - `ECMWF`
-- GEFS-based spread products
+- GEFS real-member ensemble standard-deviation products
 - Recent nearby observation skill adjustment for deterministic model weighting
 - Satellite products on the same report footprint:
   - RGB
-  - SST
-  - estimated chlorophyll-a
-  - estimated turbidity
+  - surface temperature over water
+  - experimental chlorophyll-a index
+  - experimental turbidity index
 - GUI checkboxes to skip individual satellite products when you want a faster or smaller report
 - Graceful no-water handling:
   - wind and RGB still run
@@ -53,7 +53,7 @@ These preview images are pulled from the same GitHub Pages report folder.
 - This is not a full mesoscale weather model or CFD system.
 - Deterministic winds are still only as good as the upstream forecast guidance.
 - Observation weighting is based on nearby station observations, not on-pond observations.
-- Satellite chlorophyll-a and turbidity are estimated remote-sensing products, not in situ measurements.
+- Satellite chlorophyll-a and turbidity products are experimental reflectance indices, not in situ measurements or locally validated aquatic retrievals.
 - Some model gust products are unavailable or not trustworthy at all forecast hours.
 - Experimental OpenFOAM products require a local WSL/OpenFOAM 13 installation. If it is missing, PondWind skips the CFD comparison and still builds the WindNinja report.
 
@@ -126,7 +126,7 @@ python scripts\run_barton_weekly_report.py `
   --no-satellite-turbidity
 ```
 
-Product 1 and the spread products are built with WindNinja. To add a separate experimental OpenFOAM CFD comparison product:
+Product 1 and the wind sensitivity products are built with WindNinja. To add a separate experimental OpenFOAM CFD comparison product:
 
 ```powershell
 $env:PONDWIND_OPENFOAM_RUNNER = "C:\path\to\run_openfoam_case.ps1"
@@ -242,12 +242,24 @@ The resulting consensus wind is passed into WindNinja as the production determin
 
 ### Wind variability
 
-Products 2 and 3 are not full local probabilistic forecasts. They are downscaled spread products based on `GEFS` mean and spread:
+Products 2 and 3 are not full local probabilistic forecasts. PondWind downloads real `GEFS` control/perturbation members near the site, selects a bounded set of weighted `u/v` cluster-medoid representatives for WindNinja solves, and computes weighted standard deviation from those downscaled member outputs:
 
-- product 2: wind-speed spread in `knots`
-- product 3: wind-direction spread in `degrees`
+- product 2: wind-speed ensemble standard deviation in `knots`
+- product 3: wind-direction ensemble standard deviation in `degrees`
 
-These should be interpreted as relative uncertainty guidance, not as a perfectly calibrated pond-scale ensemble.
+These should be interpreted as relative uncertainty guidance, not calibrated probabilities or a perfectly calibrated pond-scale ensemble. If real GEFS members are unavailable, PondWind falls back to the older GEFS mean/spread sensitivity method and says so in the report notes.
+
+Runtime can be tuned with environment variables when testing:
+
+```powershell
+$env:PONDWIND_MODEL_DOWNLOAD_WORKERS = "4"
+$env:PONDWIND_GEFS_MEMBER_DOWNLOAD_LIMIT = "31"
+$env:PONDWIND_GEFS_MEMBER_DOWNLOAD_WORKERS = "3"
+$env:PONDWIND_GEFS_MEMBER_SOLVE_LIMIT = "9"
+$env:PONDWIND_WINDNINJA_MEMBER_WORKERS = "2"
+```
+
+Higher WindNinja member workers can speed ensemble products on larger CPUs, but each worker launches a separate terrain solve.
 
 ## How to read the report products
 
@@ -257,26 +269,28 @@ These should be interpreted as relative uncertainty guidance, not as a perfectly
   - the footer and bottom table summarize the forecast time and upstream model values
 
 - `product_2_wind_speed_variance_knots.png`
-  - wind-speed spread in `knots`
-  - higher values mean the upstream ensemble/downscaled solution is less certain there
+  - wind-speed ensemble standard deviation in `knots`
+  - higher values mean weighted representative GEFS members create more local speed disagreement after WindNinja downscaling
 
 - `product_3_wind_direction_variance_degrees.png`
-  - directional spread in `degrees`
-  - higher values mean the modeled wind direction is less stable or less agreed upon there
+  - directional ensemble standard deviation in `degrees`
+  - higher values mean weighted representative GEFS members create more local direction disagreement after WindNinja downscaling
 
 - `product_4_openfoam_experimental_cfd_knots.png`
   - optional experimental CFD comparison against product 1
   - uses the same boundary wind and bottom model/weather context as the production wind product
   - skipped automatically if WSL/OpenFOAM 13 is unavailable
+  - custom contract runners are labeled as adapter output, not validated CFD
 
 - `product_5_openfoam_turbulence_intensity_percent.png`
-  - optional experimental neutral-CFD turbulence intensity in `%`
+  - optional experimental neutral-ABL/OpenFOAM turbulence intensity in `%`
   - uses the same report color scale as the other wind diagnostic maps
 
 - `product_6_sailing_polar_dem_overlay.png`
-  - experimental ILCA 7 / Laser Standard point polar over the cropped DEM
+  - experimental ILCA 7 / Laser Standard relative point polar over the cropped DEM
   - centered on the sampled wind cell near the selected area center
   - green arrows show best upwind VMG headings, purple arrows show best downwind VMG headings
+  - heuristic sailing aid only, not a calibrated VPP or routing model
 
 - `product_7_openfoam_sailing_polar_dem_overlay.png`
   - optional experimental CFD version of the same sailing polar overlay
@@ -286,13 +300,13 @@ These should be interpreted as relative uncertainty guidance, not as a perfectly
   - latest reasonably clear RGB scene over the report area
 
 - `satellite_sst_latest.png`
-  - latest usable surface-temperature product over water
+  - latest usable Landsat/ECOSTRESS land-surface-temperature product masked to water pixels
 
 - `satellite_chla_estimated.png`
-  - estimated chlorophyll-a from Sentinel-2 reflectance
+  - experimental chlorophyll-a index from Sentinel-2 L2A reflectance
 
 - `satellite_turbidity_estimated.png`
-  - estimated turbidity from Sentinel-2 reflectance
+  - experimental turbidity index from Sentinel-2 L2A reflectance
 
 All report images are rendered to the same report footprint for easier side-by-side comparison.
 
@@ -312,12 +326,13 @@ PondWind tries to complete a useful report even when some data sources are weak 
 - OpenFOAM comparison is optional and never replaces product 1.
 - If WSL or OpenFOAM 13 is missing, the report continues and marks the CFD comparison as skipped.
 - If the OpenFOAM solve fails mesh, convergence, sampling, or physical sanity checks, the CFD product is marked failed instead of silently using fallback data.
+- Passing the file contract only proves that a runner produced compatible grids; only the WSL terrain runner is labeled as an experimental OpenFOAM CFD candidate.
 
 ### Water products
 
 - If the selected area does not contain enough water pixels, the wind products still run.
 - RGB still runs if imagery is available.
-- `SST`, `chlorophyll-a`, and `turbidity` degrade gracefully to `N/A` panels instead of failing the whole report.
+- Surface temperature over water, chlorophyll-a, and turbidity products degrade gracefully to `N/A` panels instead of failing the whole report.
 - If a satellite product is unchecked in the GUI, PondWind skips that final product and omits it from the markdown report.
 
 ### Report structure
@@ -341,7 +356,7 @@ The GUI also lets users:
 - choose WindNinja-only output or optional experimental OpenFOAM comparison
 - set wind grid size
 - turn individual satellite products on or off
-- force ECOSTRESS SST discovery
+- force ECOSTRESS surface-temperature discovery
 - allow insecure SSL only when a local network requires it
 
 If no custom location is chosen, the packaged `.exe` writes reports to:

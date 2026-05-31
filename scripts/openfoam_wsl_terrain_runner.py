@@ -85,7 +85,7 @@ def _wsl_shell_command(command: str) -> str:
     return "\n".join([*source_lines, command])
 
 
-def _run_wsl_status(command: str, timeout_seconds: int = 1800) -> tuple[int, str]:
+def _run_wsl_status(command: str, timeout_seconds: int = 3600) -> tuple[int, str]:
     run_kwargs = {
         "check": False,
         "capture_output": True,
@@ -101,7 +101,7 @@ def _run_wsl_status(command: str, timeout_seconds: int = 1800) -> tuple[int, str
     return int(completed.returncode), (completed.stdout or "") + (completed.stderr or "")
 
 
-def _run_wsl(command: str, timeout_seconds: int = 1800) -> str:
+def _run_wsl(command: str, timeout_seconds: int = 3600) -> str:
     return_code, output = _run_wsl_status(command, timeout_seconds=timeout_seconds)
     if return_code != 0:
         raise RuntimeError(f"WSL/OpenFOAM command failed with code {return_code}: {command}\n{output}")

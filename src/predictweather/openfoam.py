@@ -432,7 +432,7 @@ def run_openfoam_domain_average(
     wind_speed_mps: float,
     wind_direction_deg: float,
     mesh_resolution_m: float,
-    timeout_seconds: int = 1800,
+    timeout_seconds: int = 3600,
 ) -> dict:
     command_prefix = _runner_command()
     if not command_prefix:
@@ -649,10 +649,23 @@ def run_openfoam_domain_average(
             runner_summary = json.loads(runner_summary_path.read_text(encoding="utf-8"))
         except Exception:
             runner_summary = {"summary_path": str(runner_summary_path), "parse_error": True}
+    runner_kind = str((runner_summary or {}).get("runner") or "custom_runner_no_wsl_summary")
+    is_scientific_cfd_candidate = runner_kind == "openfoam_wsl_terrain_runner"
+    solver_mode = str(
+        (runner_summary or {}).get("solver_mode")
+        or ("steady_incompressible_rans_abl" if is_scientific_cfd_candidate else "custom_wind_grid_adapter")
+    )
 
     return {
         "solver": "openfoam",
-        "solver_mode": "steady_incompressible_rans_abl",
+        "solver_mode": solver_mode,
+        "runner_kind": runner_kind,
+        "scientific_label": (
+            "experimental_openfoam_neutral_abl_rans"
+            if is_scientific_cfd_candidate
+            else "custom_wind_grid_adapter_not_validated_cfd"
+        ),
+        "is_scientific_cfd_candidate": is_scientific_cfd_candidate,
         "command": command,
         "stdout": completed.stdout,
         "stderr": completed.stderr,

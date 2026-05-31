@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import shutil
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -27,10 +28,11 @@ from predictweather.config import DATA_RAW_DIR, OUTPUTS_DIR, PROJECT_ROOT as RUN
 from predictweather.ecmwf import download_ecmwf_for_valid_time, sample_ecmwf_point_forecast
 from predictweather.forecast_models import choose_consensus_boundary, model_table_rows
 from predictweather.gefs import (
-    download_gefs_mean_and_spread,
+    download_gefs_mean_spread_and_members,
     floor_to_3h,
     load_cached_gefs_manifest_for_valid_time,
     sample_gefs_mean_and_spread_at_site,
+    sample_gefs_members_at_site,
 )
 from predictweather.geo import buffered_square_bbox_from_center
 from predictweather.gfs import download_gfs_for_valid_time, sample_gfs_point_forecast
@@ -42,7 +44,7 @@ from predictweather.landscape import LandscapeBuildOptions, build_landscape_geot
 from predictweather.nam import download_nam_for_valid_time, sample_nam_point_forecast
 from predictweather.nws import sample_nws_hourly_forecast
 from predictweather.observations import nearest_station_candidates, recent_same_local_hour_observations
-from predictweather.openfoam import OpenFoamRunError, compare_wind_outputs, run_openfoam_domain_average
+from predictweather.openfoam import OpenFoamRunError, _default_max_horizontal_cells, compare_wind_outputs, run_openfoam_domain_average
 from predictweather.satellite import (
     PLANETARY_COMPUTER_STAC,
     count_ecostress_water_pixels,
@@ -89,8 +91,20 @@ MAX_WATER_SCENE_CLOUD_COVER = 70.0
 MAX_LANDSAT_SCENE_CLOUD_COVER = 80.0
 LANDSAT_SST_MAX_AGE_DAYS = 10.0
 MAX_PARALLEL_DOWNLOADS = 4
-MAX_PARALLEL_MODEL_DOWNLOADS = 2
+MAX_PARALLEL_MODEL_DOWNLOADS = 4
+MAX_PARALLEL_WINDNINJA_MEMBER_SOLVES = 2
 CALM_WIND_SOLVER_THRESHOLD_MPS = 0.2
+VECTOR_REFERENCE_MESH_RESOLUTION_M = 30.0
+VECTOR_REFERENCE_STRIDE = 4
+VECTOR_REFERENCE_SCALE = 2.2
+OPENFOAM_HIGH_RESOLUTION_WARNING_BASELINE_M = 30.0
+
+
+def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
+    try:
+        return max(minimum, int(os.environ.get(name, str(default))))
+    except ValueError:
+        return max(minimum, int(default))
 
 
 def _progress(progress_callback: Callable[[int, str], None] | None, percent: int, message: str) -> None:
@@ -119,9 +133,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--solve-buffer-m", type=float, default=SiteConfig.solve_buffer_m, help="Extra buffer around the final area for WindNinja solves.")
     parser.add_argument("--report-output-dir", default=None, help="Optional directory where the report folder should be created. Defaults to outputs/reports.")
     parser.add_argument("--allow-insecure-ssl", action="store_true")
-    parser.add_argument("--force-ecostress-sst", action="store_true", help="Force ECOSTRESS SST discovery even when Landsat is recent enough.")
+    parser.add_argument("--force-ecostress-sst", action="store_true", help="Force ECOSTRESS surface-temperature discovery even when Landsat is recent enough.")
     parser.add_argument("--no-satellite-rgb", dest="satellite_rgb", action="store_false", help="Skip the latest RGB satellite product.")
-    parser.add_argument("--no-satellite-sst", dest="satellite_sst", action="store_false", help="Skip the SST satellite product.")
+    parser.add_argument("--no-satellite-sst", dest="satellite_sst", action="store_false", help="Skip the satellite surface-temperature-over-water product.")
     parser.add_argument("--no-satellite-chla", dest="satellite_chla", action="store_false", help="Skip the chlorophyll-a satellite product.")
     parser.add_argument("--no-satellite-turbidity", dest="satellite_turbidity", action="store_false", help="Skip the turbidity satellite product.")
     return parser.parse_args()
@@ -184,6 +198,205 @@ def _sigma_scenarios() -> list[tuple[float, float, str]]:
     ]
 
 
+def _gefs_member_download_limit() -> int:
+    return _env_int("PONDWIND_GEFS_MEMBER_DOWNLOAD_LIMIT", 31, minimum=0)
+
+
+def _gefs_member_solve_limit() -> int:
+    return _env_int("PONDWIND_GEFS_MEMBER_SOLVE_LIMIT", 9, minimum=0)
+
+
+def _windninja_member_workers() -> int:
+    return _env_int("PONDWIND_WINDNINJA_MEMBER_WORKERS", MAX_PARALLEL_WINDNINJA_MEMBER_SOLVES, minimum=1)
+
+
+def _model_download_workers() -> int:
+    return _env_int("PONDWIND_MODEL_DOWNLOAD_WORKERS", MAX_PARALLEL_MODEL_DOWNLOADS, minimum=1)
+
+
+def _vector_overlay_style(mesh_resolution_m: float) -> tuple[int, float]:
+    requested_resolution = max(float(mesh_resolution_m), 1.0)
+    scale_ratio = max(1.0, VECTOR_REFERENCE_MESH_RESOLUTION_M / requested_resolution)
+    stride = max(1, int(round(VECTOR_REFERENCE_STRIDE * scale_ratio)))
+    scale = VECTOR_REFERENCE_SCALE * scale_ratio
+    return stride, scale
+
+
+def _openfoam_vertical_cells() -> int:
+    return _env_int("PONDWIND_OPENFOAM_VERTICAL_CELLS", 20, minimum=1)
+
+
+def _estimate_openfoam_solve_cells_from_extent(
+    width_m: float,
+    height_m: float,
+    mesh_resolution_m: float,
+    vertical_cells: int,
+    max_horizontal_cells: int,
+) -> dict[str, int]:
+    nx = max(2, int(round(float(width_m) / max(float(mesh_resolution_m), 1.0))))
+    ny = max(2, int(round(float(height_m) / max(float(mesh_resolution_m), 1.0))))
+    while nx * ny > max_horizontal_cells:
+        nx = max(2, int(math.floor(nx * 0.9)))
+        ny = max(2, int(math.floor(ny * 0.9)))
+    horizontal_cells = int(nx * ny)
+    return {
+        "nx": int(nx),
+        "ny": int(ny),
+        "horizontal_cells": horizontal_cells,
+        "vertical_cells": int(vertical_cells),
+        "solve_cells": int(horizontal_cells * int(vertical_cells)),
+    }
+
+
+def _estimate_openfoam_solve_cells(elevation_tif: Path, mesh_resolution_m: float, vertical_cells: int) -> dict[str, int]:
+    with rasterio.open(elevation_tif) as src:
+        width_m = float(src.bounds.right - src.bounds.left)
+        height_m = float(src.bounds.top - src.bounds.bottom)
+    return _estimate_openfoam_solve_cells_from_extent(
+        width_m=width_m,
+        height_m=height_m,
+        mesh_resolution_m=mesh_resolution_m,
+        vertical_cells=vertical_cells,
+        max_horizontal_cells=_default_max_horizontal_cells(mesh_resolution_m),
+    )
+
+
+def _select_representative_gefs_members(members: list[dict], max_members: int) -> list[dict]:
+    finite_members = [
+        member
+        for member in members
+        if math.isfinite(float(member.get("u10_mps", float("nan"))))
+        and math.isfinite(float(member.get("v10_mps", float("nan"))))
+        and math.isfinite(float(member.get("speed_mps", float("nan"))))
+    ]
+    if max_members <= 0 or not finite_members:
+        return []
+    if len(finite_members) <= max_members:
+        total = max(1, len(finite_members))
+        return [
+            dict(
+                member,
+                selection_rank=index,
+                selection_reason="all_available",
+                member_weight=1.0,
+                cluster_member_count=1,
+                cluster_fraction=1.0 / total,
+                represented_member_ids=[str(member.get("member_id", index))],
+            )
+            for index, member in enumerate(finite_members)
+        ]
+
+    vectors = np.array([[float(member["u10_mps"]), float(member["v10_mps"])] for member in finite_members], dtype=np.float64)
+    center = np.nanmean(vectors, axis=0)
+    scale = np.nanstd(vectors, axis=0)
+    scale = np.where(scale < 0.25, 0.25, scale)
+    normalized = (vectors - center) / scale
+
+    selected: list[int] = []
+    def add(index: int) -> None:
+        if index not in selected and len(selected) < max_members:
+            selected.append(index)
+
+    add(int(np.argmin(np.linalg.norm(normalized, axis=1))))
+
+    while len(selected) < max_members:
+        remaining = [index for index in range(len(finite_members)) if index not in selected]
+        if not remaining:
+            break
+        selected_points = normalized[selected]
+        best_index = max(
+            remaining,
+            key=lambda index: float(np.min(np.linalg.norm(selected_points - normalized[index], axis=1))),
+        )
+        add(best_index)
+
+    selected_array = np.array(selected, dtype=np.int64)
+    assignments = np.zeros(len(finite_members), dtype=np.int64)
+    for _ in range(6):
+        selected_points = normalized[selected_array]
+        distances = np.linalg.norm(normalized[:, None, :] - selected_points[None, :, :], axis=2)
+        assignments = np.argmin(distances, axis=1)
+        next_selected = selected_array.copy()
+        for cluster_index in range(len(selected_array)):
+            members_in_cluster = np.where(assignments == cluster_index)[0]
+            if members_in_cluster.size == 0:
+                continue
+            cluster_points = normalized[members_in_cluster]
+            within_cluster_distance = np.sum(
+                np.linalg.norm(cluster_points[:, None, :] - cluster_points[None, :, :], axis=2),
+                axis=1,
+            )
+            next_selected[cluster_index] = int(members_in_cluster[int(np.argmin(within_cluster_distance))])
+        if np.array_equal(next_selected, selected_array):
+            break
+        selected_array = next_selected
+
+    selected_points = normalized[selected_array]
+    distances = np.linalg.norm(normalized[:, None, :] - selected_points[None, :, :], axis=2)
+    assignments = np.argmin(distances, axis=1)
+
+    selected_members: list[dict] = []
+    total_members = len(finite_members)
+    for rank, index in enumerate(selected_array.tolist()):
+        members_in_cluster = np.where(assignments == rank)[0]
+        represented_ids = [str(finite_members[int(member_index)].get("member_id", member_index)) for member_index in members_in_cluster]
+        selected_members.append(
+            {
+                **finite_members[index],
+                "selection_rank": rank,
+                "selection_reason": "weighted_uv_cluster_medoid",
+                "member_weight": float(len(members_in_cluster)),
+                "cluster_member_count": int(len(members_in_cluster)),
+                "cluster_fraction": float(len(members_in_cluster) / total_members),
+                "represented_member_ids": represented_ids,
+            }
+        )
+    return selected_members
+
+
+def _weighted_nanstd(stack: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    values = stack.astype(np.float64)
+    finite = np.isfinite(values)
+    safe_values = np.where(finite, values, 0.0)
+    safe_weights = np.where(finite, weights[:, None, None], 0.0)
+    weight_sum = np.sum(safe_weights, axis=0)
+    mean = np.divide(
+        np.sum(safe_values * safe_weights, axis=0),
+        weight_sum,
+        out=np.full(values.shape[1:], np.nan, dtype=np.float64),
+        where=weight_sum > 0.0,
+    )
+    variance = np.divide(
+        np.sum(((safe_values - mean[None, :, :]) ** 2) * safe_weights, axis=0),
+        weight_sum,
+        out=np.full(values.shape[1:], np.nan, dtype=np.float64),
+        where=weight_sum > 0.0,
+    )
+    return np.sqrt(np.maximum(variance, 0.0))
+
+
+def _weighted_circular_std_deg(direction_stack_deg: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    direction_rad = np.deg2rad(direction_stack_deg.astype(np.float64))
+    finite = np.isfinite(direction_rad)
+    safe_weights = np.where(finite, weights[:, None, None], 0.0)
+    weight_sum = np.sum(safe_weights, axis=0)
+    sin_mean = np.divide(
+        np.sum(np.where(finite, np.sin(direction_rad), 0.0) * safe_weights, axis=0),
+        weight_sum,
+        out=np.full(direction_rad.shape[1:], np.nan, dtype=np.float64),
+        where=weight_sum > 0.0,
+    )
+    cos_mean = np.divide(
+        np.sum(np.where(finite, np.cos(direction_rad), 0.0) * safe_weights, axis=0),
+        weight_sum,
+        out=np.full(direction_rad.shape[1:], np.nan, dtype=np.float64),
+        where=weight_sum > 0.0,
+    )
+    resultant_length = np.sqrt(sin_mean * sin_mean + cos_mean * cos_mean)
+    resultant_length = np.clip(resultant_length, 1.0e-6, 1.0)
+    return np.rad2deg(np.sqrt(-2.0 * np.log(resultant_length)))
+
+
 def _aligned_boundary_valid_time(race_time_utc: datetime) -> datetime:
     return floor_to_3h(race_time_utc)
 
@@ -224,17 +437,37 @@ def _load_fresh_or_cached_hrdps_boundary(site: SiteConfig, target_valid_time_utc
         raise RuntimeError(message) from cached_exc
 
 
-def _load_fresh_or_cached_gefs_paths(target_valid_time_utc: datetime) -> tuple[Path, Path, str]:
+def _load_fresh_or_cached_gefs_bundle(site: SiteConfig, target_valid_time_utc: datetime) -> tuple[Path, Path, dict[str, Path], str, dict]:
     fresh_error: Exception | None = None
     try:
-        gefs_selection = download_gefs_mean_and_spread(DATA_RAW_DIR, target_valid_time_utc)
-        return Path(gefs_selection.mean_files["geavg"]), Path(gefs_selection.spread_files["gespr"]), "fresh_gefs"
+        gefs_selection = download_gefs_mean_spread_and_members(
+            DATA_RAW_DIR,
+            target_valid_time_utc,
+            lat=site.center_lat,
+            lon=site.center_lon,
+            max_members=_gefs_member_download_limit(),
+        )
+        member_paths = {
+            member_id: Path(path)
+            for member_id, path in (gefs_selection.member_files or {}).items()
+            if Path(path).exists()
+        }
+        mode = "fresh_gefs_members" if member_paths else "fresh_gefs_spread_only"
+        return Path(gefs_selection.mean_files["geavg"]), Path(gefs_selection.spread_files["gespr"]), member_paths, mode, gefs_selection.__dict__
     except Exception as exc:
         fresh_error = exc
 
     try:
-        cached_manifest, _ = load_cached_gefs_manifest_for_valid_time(DATA_RAW_DIR / "gefs", target_valid_time_utc)
-        return Path(cached_manifest["mean_files"]["geavg"]), Path(cached_manifest["spread_files"]["gespr"]), "cached_gefs"
+        cached_manifest, cached_manifest_path = load_cached_gefs_manifest_for_valid_time(DATA_RAW_DIR / "gefs", target_valid_time_utc)
+        member_paths = {
+            member_id: Path(path)
+            for member_id, path in cached_manifest.get("member_files", {}).items()
+            if Path(path).exists()
+        }
+        mode = "cached_gefs_members" if member_paths else "cached_gefs_spread_only"
+        cached_manifest = dict(cached_manifest)
+        cached_manifest["manifest_path"] = str(cached_manifest_path)
+        return Path(cached_manifest["mean_files"]["geavg"]), Path(cached_manifest["spread_files"]["gespr"]), member_paths, mode, cached_manifest
     except Exception as cached_exc:
         message = f"Unable to acquire GEFS boundary for {target_valid_time_utc.isoformat()}: fresh={fresh_error!r}; cached={cached_exc!r}"
         raise RuntimeError(message) from cached_exc
@@ -319,7 +552,7 @@ def _load_model_point_forecasts(lat: float, lon: float, target_valid_time_utc: d
         ("icon", lambda: sample_icon_point_forecast(download_icon_for_valid_time(DATA_RAW_DIR, target_valid_time_utc), lat, lon, "fresh_icon")),
         ("ecmwf", lambda: sample_ecmwf_point_forecast(download_ecmwf_for_valid_time(DATA_RAW_DIR, target_valid_time_utc), lat, lon, "fresh_ecmwf")),
     ]
-    for loader_name, result, exc in _run_ordered_tasks(loaders, max_workers=MAX_PARALLEL_MODEL_DOWNLOADS):
+    for loader_name, result, exc in _run_ordered_tasks(loaders, max_workers=_model_download_workers()):
         if exc is not None:
             errors[loader_name] = repr(exc)
         elif result is not None:
@@ -594,8 +827,17 @@ def _download_satellite_inputs(
         domain.site.side_meters,
         60.0,
     )
+    diagnostics_errors: dict[str, str] = {}
 
-    sentinel_rgb_candidates = list_candidate_items(
+    def safe_list_candidate_items(label: str, **kwargs) -> list:
+        try:
+            return list_candidate_items(**kwargs)
+        except Exception as exc:
+            diagnostics_errors[label] = repr(exc)
+            return []
+
+    sentinel_rgb_candidates = safe_list_candidate_items(
+        "sentinel_rgb_search",
         collection="sentinel-2-l2a",
         bbox=render_bbox,
         end_time_utc=race_time_utc,
@@ -629,7 +871,7 @@ def _download_satellite_inputs(
                 "clear_fraction": clear_fraction,
             }
         )
-    if sentinel_rgb is None or sentinel_rgb_paths is None:
+    if (sentinel_rgb is None or sentinel_rgb_paths is None) and sentinel_rgb_candidates:
         sentinel_rgb = sentinel_rgb_candidates[0]
         sentinel_rgb_paths = download_selection_assets(
             sentinel_rgb,
@@ -646,7 +888,8 @@ def _download_satellite_inputs(
     sentinel_asset_keys = sorted(set(sentinel_asset_keys))
     should_find_sentinel_analysis = product_options["chla"] or product_options["turbidity"]
     sentinel_candidates = (
-        list_candidate_items(
+        safe_list_candidate_items(
+            "sentinel_analysis_search",
             collection="sentinel-2-l2a",
             bbox=render_bbox,
             end_time_utc=race_time_utc,
@@ -679,10 +922,14 @@ def _download_satellite_inputs(
             break
         sentinel_rejections.append({"item_id": candidate.item_id, "rank": index, "water_pixels": water_pixels})
     if should_find_sentinel_analysis and (sentinel is None or sentinel_paths is None):
-        sentinel_unavailable_reason = "No Sentinel-2 analytical scene had enough water pixels for the requested area."
+        sentinel_unavailable_reason = diagnostics_errors.get(
+            "sentinel_analysis_search",
+            "No Sentinel-2 analytical scene had enough water pixels for the requested area.",
+        )
 
     landsat_candidates = (
-        list_candidate_items(
+        safe_list_candidate_items(
+            "landsat_search",
             collection="landsat-c2-l2",
             bbox=render_bbox,
             end_time_utc=race_time_utc,
@@ -716,7 +963,10 @@ def _download_satellite_inputs(
             break
         landsat_rejections.append({"item_id": candidate.item_id, "rank": index, "water_pixels": water_pixels})
     if product_options["sst"] and (landsat is None or landsat_paths is None):
-        landsat_unavailable_reason = "No Landsat SST scene had enough water pixels for the requested area."
+        landsat_unavailable_reason = diagnostics_errors.get(
+            "landsat_search",
+            "No Landsat surface-temperature scene had enough water pixels for the requested area.",
+        )
 
     ecostress = None
     ecostress_paths: dict[str, Path] | None = None
@@ -757,7 +1007,7 @@ def _download_satellite_inputs(
                 break
             ecostress_rejections.append({"item_id": candidate.item_id, "rank": index, "water_pixels": water_pixels})
         if require_ecostress and ecostress is None and ecostress_unavailable_reason is None:
-            ecostress_unavailable_reason = "No ECOSTRESS SST scene had enough water pixels for the requested area."
+            ecostress_unavailable_reason = "No ECOSTRESS surface-temperature scene had enough water pixels for the requested area."
     else:
         ecostress_candidates = []
 
@@ -774,6 +1024,7 @@ def _download_satellite_inputs(
         "product_options": product_options,
         "selection_diagnostics": {
             "selected_products": product_options,
+            "search_errors": diagnostics_errors,
             "sentinel_rgb_candidate_count": len(sentinel_rgb_candidates),
             "rgb_scene_attempt_cap": MAX_RGB_SCENE_ATTEMPTS,
             "sentinel_rgb_selected_rank": sentinel_rgb_rank,
@@ -840,8 +1091,10 @@ def _prepare_landscape_input(
     domain_dem = domain.solve_dem_tif
     if satellite_inputs.get("sentinel_paths") is not None:
         scl_tif = Path(satellite_inputs["sentinel_paths"]["scl"])
-    else:
+    elif satellite_inputs.get("sentinel_rgb_paths") is not None:
         scl_tif = Path(satellite_inputs["sentinel_rgb_paths"]["scl"])
+    else:
+        scl_tif = None
 
     with rasterio.open(domain_dem) as src:
         bounds = src.bounds
@@ -876,7 +1129,15 @@ def _prepare_landscape_input(
     for service_key, _, exc in _run_ordered_tasks(landfire_tasks):
         if exc is not None:
             raise RuntimeError(f"Unable to export LANDFIRE {service_key} raster: {exc}") from exc
-    _resample_scl_water_mask(scl_tif, domain_dem, water_mask_tif)
+    if scl_tif is not None:
+        _resample_scl_water_mask(scl_tif, domain_dem, water_mask_tif)
+    else:
+        with rasterio.open(domain_dem) as src:
+            profile = src.profile.copy()
+            profile.update(driver="GTiff", dtype="uint8", count=1, nodata=0, compress="deflate")
+            water_mask_tif.parent.mkdir(parents=True, exist_ok=True)
+            with rasterio.open(water_mask_tif, "w", **profile) as dst:
+                dst.write(np.zeros((src.height, src.width), dtype=np.uint8), 1)
 
     summary = build_landscape_geotiff(
         dem_tif=domain_dem,
@@ -898,7 +1159,10 @@ def _prepare_landscape_input(
         ),
         summary_path=summary_json,
     )
-    return landscape_tif, summary.__dict__
+    summary_dict = summary.__dict__
+    if scl_tif is None:
+        summary_dict["water_mask_source"] = "none_satellite_unavailable"
+    return landscape_tif, summary_dict
 
 
 def _transform_from_aaigrid_header(header: dict[str, float]):
@@ -1062,7 +1326,10 @@ def _write_sailing_polar_overlay_product(
             "y": float(y),
             "local_wind_speed_knots": tws_knots,
             "local_wind_from_direction_deg": wind_from_deg,
-            "note": "Experimental ILCA 7/Laser point polar centered on the sampled wind cell and overlaid on the cropped DEM.",
+            "note": (
+                "Experimental ILCA 7/Laser relative point polar centered on the sampled wind cell and overlaid "
+                "on the cropped DEM; heuristic sailing aid, not a calibrated VPP or routing model."
+            ),
         }
     except Exception as exc:
         _write_unavailable_panel(
@@ -1107,13 +1374,24 @@ def _build_wind_products(
         site_lon=site.center_lon,
     )
 
-    gefs_mean_path, gefs_spread_path, gefs_mode = _load_fresh_or_cached_gefs_paths(boundary_target_time_utc)
+    gefs_mean_path, gefs_spread_path, gefs_member_paths, gefs_mode, gefs_manifest = _load_fresh_or_cached_gefs_bundle(
+        site,
+        boundary_target_time_utc,
+    )
     sampled_gefs = sample_gefs_mean_and_spread_at_site(
         mean_path=gefs_mean_path,
         spread_path=gefs_spread_path,
         lat=site.center_lat,
         lon=site.center_lon,
     )
+    sampled_gefs["manifest"] = gefs_manifest
+    sampled_gefs_members: list[dict] = []
+    gefs_member_sample_error: str | None = None
+    if gefs_member_paths:
+        try:
+            sampled_gefs_members = sample_gefs_members_at_site(gefs_member_paths, site.center_lat, site.center_lon)
+        except Exception as exc:
+            gefs_member_sample_error = repr(exc)
     available_sources = sorted({str(forecast.get("source", "")) for forecast in model_forecasts if forecast.get("source")})
     expected_sources = {"ecmwf", "gfs", "hrrr", "hrdps", "icon", "nam"}
     missing_sources = sorted(expected_sources - set(available_sources))
@@ -1131,8 +1409,12 @@ def _build_wind_products(
         wind_warnings.append("Missing deterministic sources: " + ", ".join(missing_sources) + ".")
     if any(str(forecast.get("acquisition_mode", "")).startswith("cached") for forecast in model_forecasts):
         wind_warnings.append("One or more deterministic model inputs came from a local cache for the exact requested valid time.")
-    if gefs_mode != "fresh_gefs":
-        wind_warnings.append(f"GEFS spread inputs came from local cache mode `{gefs_mode}`.")
+    if not gefs_mode.startswith("fresh"):
+        wind_warnings.append(f"GEFS inputs came from local cache mode `{gefs_mode}`.")
+    if gefs_member_sample_error is not None:
+        wind_warnings.append(f"GEFS member sampling failed; falling back to mean/spread sensitivity: {gefs_member_sample_error}")
+    elif not sampled_gefs_members:
+        wind_warnings.append("No usable GEFS member files were available; falling back to mean/spread sensitivity.")
     consensus = choose_consensus_boundary(
         [
             build_model_point_forecast(
@@ -1153,7 +1435,7 @@ def _build_wind_products(
         skill_metadata=skill_metadata,
     )
     boundary = consensus.boundary.as_dict()
-    wind_note = f"{consensus.selected_source}_{gefs_mode}_spread"
+    wind_note = f"{consensus.selected_source}_{gefs_mode}"
 
     wind_root = temp_dir / "wind"
     wind_root.mkdir(parents=True, exist_ok=True)
@@ -1161,6 +1443,29 @@ def _build_wind_products(
     solver_metadata: list[dict] = []
     openfoam_comparison: dict | None = None
     enable_openfoam_comparison = wind_solver == "openfoam"
+    vector_stride, vector_scale = _vector_overlay_style(mesh_resolution_m)
+    openfoam_high_resolution_warning = False
+    if enable_openfoam_comparison:
+        try:
+            vertical_cells = _openfoam_vertical_cells()
+            requested_openfoam_cells = _estimate_openfoam_solve_cells(wind_input_tif, mesh_resolution_m, vertical_cells)
+            baseline_openfoam_cells = _estimate_openfoam_solve_cells(
+                wind_input_tif,
+                OPENFOAM_HIGH_RESOLUTION_WARNING_BASELINE_M,
+                vertical_cells,
+            )
+            if requested_openfoam_cells["solve_cells"] > baseline_openfoam_cells["solve_cells"]:
+                openfoam_high_resolution_warning = True
+                wind_warnings.append(
+                    "OpenFOAM high-resolution solve is estimated at "
+                    f"{requested_openfoam_cells['solve_cells']:,} cells "
+                    f"({requested_openfoam_cells['nx']} x {requested_openfoam_cells['ny']} x "
+                    f"{requested_openfoam_cells['vertical_cells']}) versus "
+                    f"{baseline_openfoam_cells['solve_cells']:,} cells at "
+                    f"{OPENFOAM_HIGH_RESOLUTION_WARNING_BASELINE_M:.0f} m; OpenFOAM may take a while."
+                )
+        except Exception as exc:
+            wind_warnings.append(f"OpenFOAM high-resolution solve-size warning could not be calculated: {exc}")
 
     weather_inset: dict | None = None
     inset_lines: list[str] | None = None
@@ -1250,8 +1555,8 @@ def _build_wind_products(
             preview_png=product1_png,
             dem_basemap_tif=domain.dem_preview_tif,
             source_header=speed_header,
-            vector_stride=4,
-            vector_scale=2.2,
+            vector_stride=vector_stride,
+            vector_scale=vector_scale,
             colormap=diverging_blue_green_red_colormap(),
             center_value=0.0,
             title="calm",
@@ -1318,7 +1623,7 @@ def _build_wind_products(
             alpha=0.58,
             signed=False,
             center_value=model_speed_std_kts,
-            footer_text=_footer_timestamp_text(boundary_target_time_utc, "model wind speed spread"),
+            footer_text=_footer_timestamp_text(boundary_target_time_utc, "model wind speed SD"),
         )
         write_scalar_diagnostic_preview(
             field=direction_std_deg,
@@ -1331,7 +1636,7 @@ def _build_wind_products(
             alpha=0.58,
             signed=False,
             center_value=model_direction_std_deg,
-            footer_text=_footer_timestamp_text(boundary_target_time_utc, "model wind dir spread"),
+            footer_text=_footer_timestamp_text(boundary_target_time_utc, "model wind dir SD"),
         )
 
         if enable_openfoam_comparison:
@@ -1402,6 +1707,11 @@ def _build_wind_products(
             "speed_std_knots_mean": float(np.nanmean(speed_std_kts)),
             "direction_std_deg_mean": float(np.nanmean(direction_std_deg)),
             "weather_inset": weather_inset,
+            "spread_product_label": "deterministic-model disagreement standard deviation",
+            "spread_product_note": (
+                "Products 2 and 3 are constant calm-wind standard-deviation summaries from deterministic model "
+                "disagreement; terrain solvers were skipped and these are not probabilistic variance maps."
+            ),
         }
 
     solver_display = "WindNinja momentum"
@@ -1429,8 +1739,8 @@ def _build_wind_products(
         product1_png,
         dem_basemap_tif=domain.dem_preview_tif,
         source_header=speed_header,
-        vector_stride=4,
-        vector_scale=2.2,
+        vector_stride=vector_stride,
+        vector_scale=vector_scale,
         colormap=diverging_blue_green_red_colormap(),
         center_value=float(np.nanmean(speed_kts)),
         title="wind",
@@ -1453,7 +1763,13 @@ def _build_wind_products(
         openfoam_turbulence_png = report_dir / "product_5_openfoam_turbulence_intensity_percent.png"
         openfoam_sailing_polar_png = report_dir / "product_7_openfoam_sailing_polar_dem_overlay.png"
         openfoam_dir = wind_root / "openfoam_comparison"
-        _progress(progress_callback, 40, "Running experimental OpenFOAM CFD comparison...")
+        _progress(
+            progress_callback,
+            40,
+            "Running experimental OpenFOAM CFD comparison; high cell count may take a while..."
+            if openfoam_high_resolution_warning
+            else "Running experimental OpenFOAM CFD comparison...",
+        )
         try:
             openfoam_run = run_openfoam_domain_average(
                 elevation_tif=wind_input_tif,
@@ -1461,6 +1777,17 @@ def _build_wind_products(
                 wind_speed_mps=float(boundary["wind_speed_mps"]),
                 wind_direction_deg=float(boundary["wind_from_direction_deg"]),
                 mesh_resolution_m=mesh_resolution_m,
+            )
+            is_scientific_cfd_candidate = bool(openfoam_run.get("is_scientific_cfd_candidate"))
+            openfoam_product_label = (
+                "Experimental CFD comparison" if is_scientific_cfd_candidate else "Custom wind-grid adapter comparison"
+            )
+            openfoam_product_title = "cfd exp" if is_scientific_cfd_candidate else "adapter"
+            openfoam_footer_label = "experimental cfd" if is_scientific_cfd_candidate else "adapter comparison"
+            openfoam_scientific_note = (
+                "Experimental WSL/OpenFOAM neutral ABL RANS comparison; not validated for production decisions."
+                if is_scientific_cfd_candidate
+                else "Custom runner output matched the PondWind wind-grid contract, but it is not a validated OpenFOAM/CFD solve."
             )
             openfoam_paths = {key: Path(value) for key, value in openfoam_run["expected_outputs"].items()}
             openfoam_speed, openfoam_header = _read_aaigrid(openfoam_paths["speed"])
@@ -1477,14 +1804,14 @@ def _build_wind_products(
                 openfoam_png,
                 dem_basemap_tif=domain.dem_preview_tif,
                 source_header=openfoam_header,
-                vector_stride=4,
-                vector_scale=2.2,
+                vector_stride=vector_stride,
+                vector_scale=vector_scale,
                 colormap=diverging_blue_green_red_colormap(),
                 center_value=float(np.nanmean(openfoam_speed_kts)),
-                title="cfd exp",
+                title=openfoam_product_title,
                 units="knots",
                 footer_text=(
-                    f"{_footer_timestamp_text(boundary_target_time_utc, 'experimental cfd')} | "
+                    f"{_footer_timestamp_text(boundary_target_time_utc, openfoam_footer_label)} | "
                     f"bias {comparison_metrics['full_domain'].get('speed_bias_mps', float('nan')):.1f} m/s | "
                     f"rmse {comparison_metrics['full_domain'].get('speed_rmse_mps', float('nan')):.1f} m/s | not production"
                 ),
@@ -1517,7 +1844,9 @@ def _build_wind_products(
             )
             openfoam_comparison = {
                 "enabled": True,
-                "status": "completed",
+                "status": "completed" if is_scientific_cfd_candidate else "adapter_completed",
+                "product_label": openfoam_product_label,
+                "scientific_note": openfoam_scientific_note,
                 "product_png": str(openfoam_png),
                 "turbulence_png": str(openfoam_turbulence_png) if openfoam_turbulence_png.exists() else None,
                 "sailing_polar_overlay_png": str(openfoam_sailing_polar_png),
@@ -1567,42 +1896,91 @@ def _build_wind_products(
 
     deterministic_speed_header = speed_header
     deterministic_grid_shape = speed_mps.shape
-    ensemble_dir = wind_root / "gefs_sigma"
+    selected_gefs_members = _select_representative_gefs_members(sampled_gefs_members, _gefs_member_solve_limit())
+    use_real_gefs_members = len(selected_gefs_members) >= 3
+    if sampled_gefs_members and not use_real_gefs_members:
+        wind_warnings.append(
+            f"Only {len(selected_gefs_members)} usable GEFS member(s) were selected; falling back to mean/spread sensitivity."
+        )
+    ensemble_dir = wind_root / ("gefs_members" if use_real_gefs_members else "gefs_sigma")
     ensemble_dir.mkdir(parents=True, exist_ok=True)
-    _progress(progress_callback, 45, "Estimating WindNinja wind variability...")
+    _progress(
+        progress_callback,
+        45,
+        "Estimating WindNinja wind variability from GEFS members..."
+        if use_real_gefs_members
+        else "Estimating WindNinja wind variability from GEFS spread...",
+    )
     speed_members: list[np.ndarray] = []
     direction_members_deg: list[np.ndarray] = []
     speed_header: dict[str, float] | None = None
     member_records: list[dict] = []
-    for index, (sigma_u, sigma_v, label) in enumerate(_sigma_scenarios()):
-        member_u = float(sampled_gefs["mean_u10_mps"]) + sigma_u * float(sampled_gefs["spread_u10_mps"])
-        member_v = float(sampled_gefs["mean_v10_mps"]) + sigma_v * float(sampled_gefs["spread_v10_mps"])
+    if use_real_gefs_members:
+        variability_members = [
+            {
+                "label": str(member["member_id"]),
+                "member_id": str(member["member_id"]),
+                "member_source": "gefs_member",
+                "member_u": float(member["u10_mps"]),
+                "member_v": float(member["v10_mps"]),
+                "selection_reason": member.get("selection_reason"),
+                "selection_rank": member.get("selection_rank"),
+                "path": member.get("path"),
+                "member_weight": float(member.get("member_weight", 1.0)),
+                "cluster_member_count": int(member.get("cluster_member_count", 1)),
+                "cluster_fraction": float(member.get("cluster_fraction", 0.0)),
+                "represented_member_ids": member.get("represented_member_ids", [str(member["member_id"])]),
+            }
+            for member in selected_gefs_members
+        ]
+    else:
+        variability_members = [
+            {
+                "label": label,
+                "member_id": f"sigma_{label}",
+                "member_source": "gefs_mean_spread_sigma",
+                "member_u": float(sampled_gefs["mean_u10_mps"]) + sigma_u * float(sampled_gefs["spread_u10_mps"]),
+                "member_v": float(sampled_gefs["mean_v10_mps"]) + sigma_v * float(sampled_gefs["spread_v10_mps"]),
+                "selection_reason": "fallback_sigma_point",
+                "selection_rank": index,
+                "path": None,
+                "member_weight": 1.0,
+                "cluster_member_count": 1,
+                "cluster_fraction": 1.0 / max(1, len(_sigma_scenarios())),
+                "represented_member_ids": [f"sigma_{label}"],
+            }
+            for index, (sigma_u, sigma_v, label) in enumerate(_sigma_scenarios())
+        ]
+
+    def solve_variability_member(index: int, member: dict) -> dict:
+        label = str(member["label"])
+        member_u = float(member["member_u"])
+        member_v = float(member["member_v"])
         member_speed_mps, member_direction_deg = _uv_to_speed_dir(member_u, member_v)
         member_direction_safe_deg = member_direction_deg if math.isfinite(member_direction_deg) else 0.0
-        member_dir = ensemble_dir / f"member_{index:02d}"
+        safe_label = "".join(char if char.isalnum() or char in {"_", "-"} else "_" for char in label)
+        member_dir = ensemble_dir / f"member_{index:02d}_{safe_label}"
         member_ascii: dict[str, Path] | None = None
         if not math.isfinite(member_speed_mps) or member_speed_mps < CALM_WIND_SOLVER_THRESHOLD_MPS:
             speed_grid = np.zeros(deterministic_grid_shape, dtype=np.float32)
             direction_grid_deg = np.full(deterministic_grid_shape, member_direction_safe_deg % 360.0, dtype=np.float32)
             member_header = deterministic_speed_header
-            solver_metadata.append(
-                {
-                    "role": f"member_{index:02d}",
-                    "solver": "calm_direct",
-                    "solver_mode": "calm_guard",
-                    "status": "skipped",
-                    "threshold_mps": CALM_WIND_SOLVER_THRESHOLD_MPS,
-                    "wind_speed_mps": member_speed_mps,
-                    "wind_from_direction_deg": member_direction_safe_deg,
-                }
-            )
+            solver_run_metadata = {
+                "role": f"member_{index:02d}",
+                "solver": "calm_direct",
+                "solver_mode": "calm_guard",
+                "status": "skipped",
+                "threshold_mps": CALM_WIND_SOLVER_THRESHOLD_MPS,
+                "wind_speed_mps": member_speed_mps,
+                "wind_from_direction_deg": member_direction_safe_deg,
+            }
         else:
             member_run = run_windninja_solver(
                 output_dir=member_dir,
                 wind_speed_mps=member_speed_mps,
                 wind_direction_deg=member_direction_deg,
             )
-            solver_metadata.append({"role": f"member_{index:02d}", **member_run})
+            solver_run_metadata = {"role": f"member_{index:02d}", **member_run}
             member_ascii = expected_windninja_ascii_paths(
                 elevation_tif=wind_input_tif,
                 wind_speed_mps=member_speed_mps,
@@ -1614,60 +1992,93 @@ def _build_wind_products(
             direction_grid_deg, _ = _read_aaigrid(member_ascii["direction"])
         speed_finite_cells = int(np.isfinite(speed_grid).sum())
         direction_finite_cells = int(np.isfinite(direction_grid_deg).sum())
+        record = {
+            "member": index,
+            "scenario": label,
+            "member_id": member["member_id"],
+            "member_source": member["member_source"],
+            "selection_rank": member.get("selection_rank"),
+            "selection_reason": member.get("selection_reason"),
+            "member_weight": float(member.get("member_weight", 1.0)),
+            "cluster_member_count": int(member.get("cluster_member_count", 1)),
+            "cluster_fraction": float(member.get("cluster_fraction", 0.0)),
+            "represented_member_ids": member.get("represented_member_ids", [str(member["member_id"])]),
+            "member_path": member.get("path"),
+            "wind_speed_mps": member_speed_mps,
+            "wind_speed_kts": member_speed_mps * 1.94384449,
+            "wind_from_direction_deg": member_direction_safe_deg,
+            "speed_finite_cells": speed_finite_cells,
+            "direction_finite_cells": direction_finite_cells,
+            "speed_output": None if member_ascii is None else str(member_ascii["speed"]),
+            "direction_output": None if member_ascii is None else str(member_ascii["direction"]),
+            "status": "skipped_calm" if member_ascii is None else "completed",
+        }
+        return {
+            "solver_metadata": solver_run_metadata,
+            "speed_grid": speed_grid,
+            "direction_grid_deg": direction_grid_deg,
+            "member_header": member_header,
+            "record": record,
+        }
+
+    member_tasks = [
+        (
+            str(member["label"]),
+            lambda index=index, member=member: solve_variability_member(index, member),
+        )
+        for index, member in enumerate(variability_members)
+    ]
+    member_worker_count = min(_windninja_member_workers(), len(member_tasks))
+    for member_name, result, exc in _run_ordered_tasks(member_tasks, max_workers=member_worker_count):
+        if exc is not None or result is None:
+            raise RuntimeError(f"WindNinja GEFS variability member `{member_name}` failed: {exc!r}") from exc
+        solver_metadata.append(result["solver_metadata"])
+        speed_grid = result["speed_grid"]
+        direction_grid_deg = result["direction_grid_deg"]
+        member_header = result["member_header"]
         if speed_header is None:
             speed_header = member_header
         speed_members.append(speed_grid)
         direction_members_deg.append(direction_grid_deg)
-        member_records.append(
-            {
-                "member": index,
-                "scenario": label,
-                "wind_speed_mps": member_speed_mps,
-                "wind_speed_kts": member_speed_mps * 1.94384449,
-                "wind_from_direction_deg": member_direction_safe_deg,
-                "speed_finite_cells": speed_finite_cells,
-                "direction_finite_cells": direction_finite_cells,
-                "speed_output": None if member_ascii is None else str(member_ascii["speed"]),
-                "direction_output": None if member_ascii is None else str(member_ascii["direction"]),
-                "status": "skipped_calm" if member_ascii is None else "completed",
-            }
-        )
+        member_records.append(result["record"])
 
     speed_stack = np.stack(speed_members, axis=0).astype(np.float32)
     direction_stack_deg = np.stack(direction_members_deg, axis=0).astype(np.float32)
     if not np.isfinite(speed_stack).any():
-        raise RuntimeError(f"{solver_display} GEFS sigma ensemble produced no finite speed cells: {member_records}")
+        raise RuntimeError(f"{solver_display} GEFS variability ensemble produced no finite speed cells: {member_records}")
     if not np.isfinite(direction_stack_deg).any():
-        raise RuntimeError(f"{solver_display} GEFS sigma ensemble produced no finite direction cells: {member_records}")
-    speed_std_kts = (np.nanstd(speed_stack, axis=0) * 1.94384449).astype(np.float32)
-
-    direction_rad = np.deg2rad(direction_stack_deg)
-    sin_mean = np.nanmean(np.sin(direction_rad), axis=0)
-    cos_mean = np.nanmean(np.cos(direction_rad), axis=0)
-    resultant_length = np.sqrt(sin_mean * sin_mean + cos_mean * cos_mean)
-    resultant_length = np.clip(resultant_length, 1.0e-6, 1.0)
-    direction_std_deg = np.rad2deg(np.sqrt(-2.0 * np.log(resultant_length))).astype(np.float32)
+        raise RuntimeError(f"{solver_display} GEFS variability ensemble produced no finite direction cells: {member_records}")
+    member_weights = np.array([max(0.0, float(record.get("member_weight", 1.0))) for record in member_records], dtype=np.float64)
+    if not np.any(member_weights > 0.0):
+        member_weights = np.ones(len(member_records), dtype=np.float64)
+    speed_std_kts = (_weighted_nanstd(speed_stack, member_weights) * 1.94384449).astype(np.float32)
+    direction_std_deg = _weighted_circular_std_deg(direction_stack_deg, member_weights).astype(np.float32)
     if not np.isfinite(speed_std_kts).any():
         raise RuntimeError(f"Wind speed spread grid has no finite cells after ensemble reduction: {member_records}")
     if not np.isfinite(direction_std_deg).any():
         raise RuntimeError(f"Wind direction spread grid has no finite cells after ensemble reduction: {member_records}")
 
     if speed_header is None:
-        raise RuntimeError("GEFS sigma ensemble did not produce any members.")
+        raise RuntimeError("GEFS variability ensemble did not produce any members.")
 
+    product1_whisker_label = (
+        "faint whiskers show real GEFS member dir SD"
+        if use_real_gefs_members
+        else "faint whiskers show GEFS dir-spread sensitivity"
+    )
     write_windninja_knots_vector_preview_from_speed_angle(
         ascii_paths["speed"],
         ascii_paths["direction"],
         product1_png,
         dem_basemap_tif=domain.dem_preview_tif,
         source_header=deterministic_speed_header,
-        vector_stride=4,
-        vector_scale=2.2,
+        vector_stride=vector_stride,
+        vector_scale=vector_scale,
         colormap=diverging_blue_green_red_colormap(),
         center_value=float(np.nanmean(speed_kts)),
         title="wind",
         units="knots",
-        footer_text=f"{_footer_timestamp_text(boundary_target_time_utc, 'wind forecast')} | faint whiskers show GEFS dir SD",
+        footer_text=f"{_footer_timestamp_text(boundary_target_time_utc, 'wind forecast')} | {product1_whisker_label}",
         inset_lines=inset_lines,
         direction_uncertainty_deg=direction_std_deg,
         direction_uncertainty_stride_multiplier=1,
@@ -1699,6 +2110,8 @@ def _build_wind_products(
     product3_png = report_dir / "product_3_wind_direction_variance_degrees.png"
     _progress(progress_callback, 58, "Rendering wind maps...")
     colormap = diverging_blue_green_red_colormap()
+    speed_spread_footer_label = "wind speed ensemble SD" if use_real_gefs_members else "wind speed SD sensitivity"
+    direction_spread_footer_label = "wind dir ensemble SD" if use_real_gefs_members else "wind dir SD sensitivity"
     try:
         write_scalar_diagnostic_preview(
             field=speed_std_kts,
@@ -1711,7 +2124,7 @@ def _build_wind_products(
             alpha=0.58,
             signed=False,
             center_value=float(np.nanmean(speed_std_kts)),
-            footer_text=_footer_timestamp_text(boundary_target_time_utc, "wind speed spread"),
+            footer_text=_footer_timestamp_text(boundary_target_time_utc, speed_spread_footer_label),
         )
         write_scalar_diagnostic_preview(
             field=direction_std_deg,
@@ -1724,7 +2137,7 @@ def _build_wind_products(
             alpha=0.58,
             signed=False,
             center_value=float(np.nanmean(direction_std_deg)),
-            footer_text=_footer_timestamp_text(boundary_target_time_utc, "wind dir spread"),
+            footer_text=_footer_timestamp_text(boundary_target_time_utc, direction_spread_footer_label),
         )
     except ValueError as exc:
         diagnostics = {
@@ -1773,6 +2186,34 @@ def _build_wind_products(
         "speed_std_knots_mean": float(np.nanmean(speed_std_kts)),
         "direction_std_deg_mean": float(np.nanmean(direction_std_deg)),
         "weather_inset": weather_inset,
+        "gefs_members_available_count": len(sampled_gefs_members),
+        "gefs_members_selected_count": len(selected_gefs_members) if use_real_gefs_members else 0,
+        "gefs_member_solve_limit": _gefs_member_solve_limit(),
+        "gefs_member_download_limit": _gefs_member_download_limit(),
+        "gefs_member_download_workers": _env_int("PONDWIND_GEFS_MEMBER_DOWNLOAD_WORKERS", 3, minimum=1),
+        "windninja_member_workers": member_worker_count,
+        "model_download_workers": _model_download_workers(),
+        "gefs_member_selection_method": "weighted_uv_cluster_medoids" if use_real_gefs_members else "fallback_mean_spread_sigma_points",
+        "gefs_member_weight_sum": float(np.sum(member_weights)),
+        "spread_product_label": (
+            "weighted real GEFS member standard deviation"
+            if use_real_gefs_members
+            else "GEFS component-spread standard-deviation sensitivity"
+        ),
+        "spread_product_note": (
+            (
+                "Products 2 and 3, plus the faint product-1 direction whiskers, are standard-deviation maps "
+                f"from {len(selected_gefs_members)} weighted cluster-medoid GEFS member boundary winds representing "
+                f"{len(sampled_gefs_members)} available members. They are downscaled with WindNinja and "
+                "are still relative pond-scale ensemble guidance, not calibrated probabilities."
+            )
+            if use_real_gefs_members
+            else (
+                "Products 2 and 3, plus the faint product-1 direction whiskers, are standard-deviation sensitivity "
+                "maps from five synthetic GEFS u/v component-spread perturbations because real GEFS members were "
+                "not available. They are not calibrated probabilistic variance maps or raw GEFS member probabilities."
+            )
+        ),
     }
 
 
@@ -1798,7 +2239,8 @@ def _build_satellite_products(
     _progress(progress_callback, 76, "Rendering satellite products...")
 
     rgb_png = report_dir / "satellite_rgb_latest.png"
-    if product_options["rgb"]:
+    sentinel_rgb_selection = None
+    if product_options["rgb"] and sentinel_rgb is not None and sentinel_rgb_paths is not None:
         sentinel_rgb_time = datetime.fromisoformat(sentinel_rgb.item_datetime_utc.replace("Z", "+00:00"))
         render_rgb_preview(
             sentinel_rgb_paths["visual"],
@@ -1807,6 +2249,19 @@ def _build_satellite_products(
             dem_basemap_tif=dem_basemap_tif,
             title="rgb",
             footer_text=_footer_timestamp_text(sentinel_rgb_time, "rgb collected"),
+        )
+        sentinel_rgb_selection = {
+            "item_id": sentinel_rgb.item_id,
+            "datetime_utc": sentinel_rgb.item_datetime_utc,
+            "cloud_cover": sentinel_rgb.cloud_cover,
+        }
+    elif product_options["rgb"]:
+        reason = selection_diagnostics.get("search_errors", {}).get("sentinel_rgb_search") or "No usable Sentinel-2 RGB scene was available."
+        _write_unavailable_panel(
+            rgb_png,
+            title="rgb",
+            line1="N/A - satellite unavailable",
+            line2=reason,
         )
 
     chla_png = report_dir / "satellite_chla_estimated.png"
@@ -1895,7 +2350,7 @@ def _build_satellite_products(
 
     sst_selection = None
     if not product_options["sst"]:
-        sst_summary = _skipped_satellite_summary("sst")
+        sst_summary = _skipped_satellite_summary("surface_temperature_over_water")
     elif ecostress is not None and ecostress_paths is not None:
         ecostress_time = datetime.fromisoformat(ecostress.item_datetime_utc.replace("Z", "+00:00"))
         sst_tif = temp_dir / "satellite_sst_latest.tif"
@@ -1907,7 +2362,7 @@ def _build_satellite_products(
             output_tif=sst_tif,
             output_png=sst_png,
             dem_basemap_tif=dem_basemap_tif,
-            footer_text=_footer_timestamp_text(ecostress_time, "sst collected"),
+            footer_text=_footer_timestamp_text(ecostress_time, "surface temp collected"),
         )
         sst_selection = {
             "source": "ecostress",
@@ -1928,7 +2383,7 @@ def _build_satellite_products(
             output_tif=sst_tif,
             output_png=sst_png,
             dem_basemap_tif=dem_basemap_tif,
-            footer_text=_footer_timestamp_text(landsat_time, "sst collected"),
+            footer_text=_footer_timestamp_text(landsat_time, "surface temp collected"),
         )
         sst_selection = {
             "source": "landsat",
@@ -1944,12 +2399,13 @@ def _build_satellite_products(
         )
         _write_unavailable_panel(
             sst_png,
-            title="sst",
+            title="surf t",
             line1="N/A - insufficient water coverage",
             line2=reason,
         )
         sst_summary = {
-            "product": "sst",
+            "product": "surface_temperature_over_water",
+            "legacy_product": "sst",
             "status": "unavailable",
             "reason": reason,
             "output_png": str(sst_png),
@@ -1958,11 +2414,7 @@ def _build_satellite_products(
 
     return {
         "selected_products": product_options,
-        "sentinel_rgb_selection": {
-            "item_id": sentinel_rgb.item_id,
-            "datetime_utc": sentinel_rgb.item_datetime_utc,
-            "cloud_cover": sentinel_rgb.cloud_cover,
-        },
+        "sentinel_rgb_selection": sentinel_rgb_selection,
         "sentinel_selection": sentinel_selection,
         "sst_selection": sst_selection,
         "selection_diagnostics": selection_diagnostics,
@@ -1982,9 +2434,14 @@ def _write_markdown_report(report_dir: Path, race_time_local: datetime, site: Si
     satellite_options = _satellite_product_options(**satellite.get("selected_products", {}))
     satellite_lines: list[str] = ["", "## Satellite products"]
     if satellite_options["rgb"]:
+        rgb_selection = satellite.get("sentinel_rgb_selection")
         satellite_lines.extend(
             [
-                f"Sentinel-2 RGB source: `{satellite['sentinel_rgb_selection']['item_id']}` at `{satellite['sentinel_rgb_selection']['datetime_utc']}`",
+                (
+                    f"Sentinel-2 RGB source: `{rgb_selection['item_id']}` at `{rgb_selection['datetime_utc']}`"
+                    if rgb_selection is not None
+                    else "Sentinel-2 RGB: unavailable"
+                ),
                 "",
                 f"![Latest RGB]({_app_path(satellite['rgb_png'])})",
                 "",
@@ -1994,12 +2451,12 @@ def _write_markdown_report(report_dir: Path, race_time_local: datetime, site: Si
         satellite_lines.extend(
             [
                 (
-                    f"Estimated chlorophyll-a source: `{sentinel_selection['item_id']}`"
+                    f"Experimental chlorophyll-a index source: `{sentinel_selection['item_id']}`"
                     if sentinel_selection is not None
-                    else f"Estimated chlorophyll-a: unavailable ({chl_a.get('reason', 'insufficient water coverage')})"
+                    else f"Experimental chlorophyll-a index: unavailable ({chl_a.get('reason', 'insufficient water coverage')})"
                 ),
                 "",
-                f"![Estimated chlorophyll-a]({_app_path(chl_a['output_png'])})",
+                f"![Experimental chlorophyll-a index]({_app_path(chl_a['output_png'])})",
                 "",
             ]
         )
@@ -2007,12 +2464,12 @@ def _write_markdown_report(report_dir: Path, race_time_local: datetime, site: Si
         satellite_lines.extend(
             [
                 (
-                    f"Estimated turbidity source: `{sentinel_selection['item_id']}`"
+                    f"Experimental turbidity index source: `{sentinel_selection['item_id']}`"
                     if sentinel_selection is not None
-                    else f"Estimated turbidity: unavailable ({turbidity.get('reason', 'insufficient water coverage')})"
+                    else f"Experimental turbidity index: unavailable ({turbidity.get('reason', 'insufficient water coverage')})"
                 ),
                 "",
-                f"![Estimated turbidity]({_app_path(turbidity['output_png'])})",
+                f"![Experimental turbidity index]({_app_path(turbidity['output_png'])})",
                 "",
             ]
         )
@@ -2020,12 +2477,12 @@ def _write_markdown_report(report_dir: Path, race_time_local: datetime, site: Si
         satellite_lines.extend(
             [
                 (
-                    f"{sst_selection['source'].upper()} SST source: `{sst_selection['item_id']}` at `{sst_selection['datetime_utc']}`"
+                    f"{sst_selection['source'].upper()} surface-temperature-over-water source: `{sst_selection['item_id']}` at `{sst_selection['datetime_utc']}`"
                     if sst_selection is not None
-                    else f"SST: unavailable ({sst.get('reason', 'insufficient water coverage')})"
+                    else f"Surface temperature over water: unavailable ({sst.get('reason', 'insufficient water coverage')})"
                 ),
                 "",
-                f"![Latest SST]({_app_path(sst['output_png'])})",
+                f"![Satellite surface temperature over water]({_app_path(sst['output_png'])})",
                 "",
             ]
         )
@@ -2033,17 +2490,23 @@ def _write_markdown_report(report_dir: Path, race_time_local: datetime, site: Si
         satellite_lines.extend(["No satellite products were selected for this report.", ""])
 
     note_lines = [
-        f"- Wind variance products are single-time GEFS sigma-spread maps downscaled with `{wind['wind_solver_display']}`.",
+        f"- {wind.get('spread_product_note', 'Wind ensemble products are standard-deviation maps, not calibrated probability maps.')}",
         f"- Wind data mode for this run: `{wind['wind_data_mode']}`.",
     ]
     if wind.get("warnings"):
-        note_lines.extend(f"- Wind acquisition warning: {warning}" for warning in wind["warnings"])
+        note_lines.extend(f"- Wind warning: {warning}" for warning in wind["warnings"])
     if satellite_options["chla"]:
-        note_lines.append("- Chlorophyll-a is an estimated satellite retrieval from Sentinel-2 red/red-edge reflectance, not an in situ measurement.")
+        note_lines.append("- Chlorophyll-a is an experimental satellite index from Sentinel-2 L2A reflectance, not an in situ or locally validated aquatic retrieval.")
     if satellite_options["turbidity"]:
-        note_lines.append("- Turbidity is an estimated Sentinel-2 red/NIR remote-sensing retrieval, not an in situ measurement.")
+        note_lines.append("- Turbidity is an experimental Sentinel-2 red/NIR index, not an in situ or locally validated aquatic retrieval.")
+    if satellite_options["sst"]:
+        note_lines.append("- Surface temperature over water comes from Landsat/ECOSTRESS land-surface-temperature products masked to water pixels; it is not a direct in-water thermometer.")
     if any(satellite_options.values()):
         note_lines.append("- Cloudy scenes are allowed; this report uses the best recent scene available before race time.")
+    if wind.get("sailing_polar_overlay", {}).get("product_png"):
+        note_lines.append(
+            "- Sailing polar overlays are experimental single-point ILCA relative estimates and should not be treated as calibrated boat-speed predictions."
+        )
 
     openfoam_comparison = wind.get("openfoam_comparison", {"enabled": False})
     sailing_polar = wind.get("sailing_polar_overlay", {})
@@ -2051,12 +2514,13 @@ def _write_markdown_report(report_dir: Path, race_time_local: datetime, site: Si
     if openfoam_comparison.get("enabled"):
         turbulence_png = openfoam_comparison.get("turbulence_png")
         openfoam_sailing_polar_png = openfoam_comparison.get("sailing_polar_overlay_png")
+        openfoam_label = openfoam_comparison.get("product_label", "Experimental CFD comparison")
         openfoam_lines = [
             "",
-            "## Experimental CFD comparison",
+            f"## {openfoam_label}",
             f"Status: `{openfoam_comparison.get('status', 'unknown')}`",
             "",
-            f"![Experimental CFD comparison]({_app_path(openfoam_comparison['product_png'])})",
+            f"![{openfoam_label}]({_app_path(openfoam_comparison['product_png'])})",
             "",
             *(
                 [
@@ -2078,7 +2542,11 @@ def _write_markdown_report(report_dir: Path, race_time_local: datetime, site: Si
                 if turbulence_png
                 else []
             ),
-            "This product is experimental and is shown for comparison only; product 1 remains the WindNinja production wind prediction.",
+            openfoam_comparison.get(
+                "scientific_note",
+                "This product is experimental and is shown for comparison only; product 1 remains the WindNinja production wind prediction.",
+            ),
+            "Product 1 remains the WindNinja production wind prediction.",
             "",
         ]
     report_path = report_dir / "weekly_report.md"
@@ -2098,17 +2566,17 @@ def _write_markdown_report(report_dir: Path, race_time_local: datetime, site: Si
             "",
             *(
                 [
-                    "Sailing point polar over the cropped DEM:",
+                    "Experimental single-point ILCA relative polar over the cropped DEM:",
                     "",
-                    f"![Sailing point polar overlay]({_app_path(sailing_polar['product_png'])})",
+                    f"![Experimental single-point ILCA relative polar overlay]({_app_path(sailing_polar['product_png'])})",
                     "",
                 ]
                 if sailing_polar.get("product_png")
                 else []
             ),
-            f"![Wind speed spread]({_app_path(wind['product_2'])})",
+            f"![Wind speed ensemble SD]({_app_path(wind['product_2'])})",
             "",
-            f"![Wind direction spread]({_app_path(wind['product_3'])})",
+            f"![Wind direction ensemble SD]({_app_path(wind['product_3'])})",
             *openfoam_lines,
             *satellite_lines,
             "",

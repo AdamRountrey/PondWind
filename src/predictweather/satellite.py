@@ -738,7 +738,10 @@ def derive_sentinel_chla(
         "mean_mg_m3": float(np.nanmean(chla)),
         "output_tif": str(output_tif),
         "output_png": str(output_png),
-        "note": "Estimated chlorophyll-a from Sentinel-2 red/red-edge NDCI with a literature-based empirical conversion.",
+        "note": (
+            "Experimental chlorophyll-a index from Sentinel-2 L2A BOA red/red-edge reflectance using an "
+            "NDCI-style empirical conversion; not aquatic-atmosphere corrected or locally validated."
+        ),
     }
 
 
@@ -828,7 +831,10 @@ def derive_sentinel_turbidity(
         "mean_fnu": float(np.nanmean(turbidity)),
         "output_tif": str(output_tif),
         "output_png": str(output_png),
-        "note": "Estimated turbidity from Sentinel-2 red and NIR reflectance using a Dogliotti-style switching algorithm.",
+        "note": (
+            "Experimental turbidity index from Sentinel-2 L2A BOA red/NIR reflectance using a "
+            "Dogliotti-style switching algorithm; not aquatic-atmosphere corrected or locally validated."
+        ),
     }
 
 
@@ -863,7 +869,7 @@ def derive_landsat_sst(
     water_mask = valid_qa & (((qa_bits >> 7) & 1) == 1)
     _validate_min_pixels("Landsat water-classified pixels", water_mask)
     sst = np.where((cloud_bits == 0) & water_mask, fahrenheit, np.nan).astype(np.float32)
-    _validate_min_pixels("Landsat SST output", np.isfinite(sst))
+    _validate_min_pixels("Landsat surface-temperature-over-water output", np.isfinite(sst))
 
     _write_single_band_geotiff(output_tif, sst, transform, crs)
     _render_scalar_product(
@@ -872,7 +878,7 @@ def derive_landsat_sst(
         crs=crs,
         output_png=output_png,
         dem_basemap_tif=dem_basemap_tif,
-        title="sst",
+        title="surf t",
         units="deg f",
         colormap=[
             (0.00, (49, 88, 173)),
@@ -884,7 +890,8 @@ def derive_landsat_sst(
         footer_text=footer_text,
     )
     return {
-        "product": "sst",
+        "product": "surface_temperature_over_water",
+        "legacy_product": "sst",
         "source": "landsat",
         "item_bbox": [bbox.min_lon, bbox.min_lat, bbox.max_lon, bbox.max_lat],
         "min_deg_f": float(np.nanmin(sst)),
@@ -939,7 +946,7 @@ def derive_ecostress_sst(
     cloud_mask = np.isfinite(cloud) & (cloud > 0.5)
     fahrenheit = (kelvin - 273.15) * 9.0 / 5.0 + 32.0
     sst = np.where(water_mask & ~cloud_mask, fahrenheit, np.nan).astype(np.float32)
-    _validate_min_pixels("ECOSTRESS SST output", np.isfinite(sst))
+    _validate_min_pixels("ECOSTRESS surface-temperature-over-water output", np.isfinite(sst))
 
     _write_single_band_geotiff(output_tif, sst, lst_transform, lst_crs)
     _render_scalar_product(
@@ -948,7 +955,7 @@ def derive_ecostress_sst(
         crs=lst_crs,
         output_png=output_png,
         dem_basemap_tif=dem_basemap_tif,
-        title="sst",
+        title="surf t",
         units="deg f",
         colormap=[
             (0.00, (49, 88, 173)),
@@ -960,7 +967,8 @@ def derive_ecostress_sst(
         footer_text=footer_text,
     )
     return {
-        "product": "sst",
+        "product": "surface_temperature_over_water",
+        "legacy_product": "sst",
         "source": "ecostress",
         "item_bbox": [bbox.min_lon, bbox.min_lat, bbox.max_lon, bbox.max_lat],
         "min_deg_f": float(np.nanmin(sst)),

@@ -2,20 +2,29 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 
 import cfgrib
 import numpy as np
 
 from predictweather.grib_lock import GRIB_DECODE_LOCK
 from predictweather.http import download_url_to_file, env_allows_insecure_ssl, url_exists
+from predictweather.nomads import site_subregion
+from predictweather.noaa_pds import download_indexed_message, has_indexed_messages
 
 GEFS_BASE_URL = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/gens/prod"
+GEFS_PDS_BASE_URL = "https://noaa-gefs-pds.s3.amazonaws.com"
+GEFS_FILTER_SCRIPT = "filter_gefs_atmos_0p50a.pl"
 RUN_HOURS_UTC = (0, 6, 12, 18)
 FORECAST_STEP_HOURS = 3
+GEFS_MEMBER_PRODUCTS = ("gec00",) + tuple(f"gep{index:02d}" for index in range(1, 31))
 
 
 @dataclass(frozen=True)
@@ -26,6 +35,8 @@ class GefsBoundarySelection:
     forecast_hour: int
     mean_files: dict[str, str]
     spread_files: dict[str, str]
+    member_files: dict[str, str] | None = None
+    member_errors: dict[str, str] | None = None
 
 
 def floor_to_3h(timestamp: datetime) -> datetime:
@@ -62,6 +73,38 @@ def build_gefs_filename(product: str, run_at_utc: datetime, forecast_hour: int) 
 def build_gefs_url(product: str, run_at_utc: datetime, forecast_hour: int) -> str:
     filename = build_gefs_filename(product, run_at_utc, forecast_hour)
     return f"{GEFS_BASE_URL}/gefs.{run_at_utc:%Y%m%d}/{run_at_utc:%H}/atmos/pgrb2ap5/{filename}"
+
+
+def build_gefs_pds_url(product: str, run_at_utc: datetime, forecast_hour: int) -> str:
+    filename = build_gefs_filename(product, run_at_utc, forecast_hour)
+    return f"{GEFS_PDS_BASE_URL}/gefs.{run_at_utc:%Y%m%d}/{run_at_utc:%H}/atmos/pgrb2ap5/{filename}"
+
+
+def build_gefs_subset_url(
+    product: str,
+    run_at_utc: datetime,
+    forecast_hour: int,
+    *,
+    lat: float,
+    lon: float,
+    padding_deg: float = 0.45,
+) -> str:
+    """Build a small NOMADS subset URL containing only 10 m U/V wind near the site."""
+    filename = build_gefs_filename(product, run_at_utc, forecast_hour)
+    region = site_subregion(lat, lon, padding_deg=padding_deg, lon_360=True)
+    query = {
+        "file": filename,
+        "lev_10_m_above_ground": "on",
+        "var_UGRD": "on",
+        "var_VGRD": "on",
+        "subregion": "",
+        "leftlon": f"{region['leftlon']:.4f}",
+        "rightlon": f"{region['rightlon']:.4f}",
+        "toplat": f"{region['toplat']:.4f}",
+        "bottomlat": f"{region['bottomlat']:.4f}",
+        "dir": f"/gefs.{run_at_utc:%Y%m%d}/{run_at_utc:%H}/atmos/pgrb2ap5",
+    }
+    return f"https://nomads.ncep.noaa.gov/cgi-bin/{GEFS_FILTER_SCRIPT}?{urlencode(query)}"
 
 
 def _parse_iso_utc(value: str) -> datetime:
@@ -124,9 +167,13 @@ def select_best_run(valid_at_utc: datetime) -> tuple[datetime, int]:
     for run_at, forecast_hour in candidate_runs_for_valid_time(valid_at_utc):
         all_present = True
         for product in ("geavg", "gespr"):
-            probe_url = build_gefs_url(product, run_at, forecast_hour)
+            pds_url = build_gefs_pds_url(product, run_at, forecast_hour)
+            nomads_url = build_gefs_url(product, run_at, forecast_hour)
             try:
-                if not url_exists(probe_url, allow_insecure=env_allows_insecure_ssl()):
+                if not (
+                    has_indexed_messages(pds_url, (("UGRD", "10 m above ground"), ("VGRD", "10 m above ground")))
+                    or url_exists(nomads_url, allow_insecure=env_allows_insecure_ssl())
+                ):
                     all_present = False
                     break
             except HTTPError:
@@ -143,6 +190,40 @@ def select_best_run(valid_at_utc: datetime) -> tuple[datetime, int]:
     raise FileNotFoundError(f"No GEFS run found for valid time {valid_at_utc.isoformat()}")
 
 
+def _download_gefs_product(path: Path, product: str, run_at_utc: datetime, forecast_hour: int) -> str:
+    pds_url = build_gefs_pds_url(product, run_at_utc, forecast_hour)
+    try:
+        return _download_gefs_indexed_uv_product(path, pds_url)
+    except Exception:
+        nomads_url = build_gefs_url(product, run_at_utc, forecast_hour)
+        download_url_to_file(nomads_url, path, allow_insecure=env_allows_insecure_ssl())
+        return "nomads_full_file"
+
+
+def _download_gefs_indexed_uv_product(destination: Path, grib_url: str) -> str:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    part_paths = [
+        destination.with_name(f"{destination.name}.UGRD.partial"),
+        destination.with_name(f"{destination.name}.VGRD.partial"),
+    ]
+    try:
+        download_indexed_message(grib_url, part_paths[0], variable="UGRD", level_text="10 m above ground")
+        download_indexed_message(grib_url, part_paths[1], variable="VGRD", level_text="10 m above ground")
+        temp_path = destination.with_name(f"{destination.name}.partial")
+        with temp_path.open("wb") as output:
+            for part_path in part_paths:
+                with part_path.open("rb") as part:
+                    shutil.copyfileobj(part, output)
+        temp_path.replace(destination)
+        return "noaa_pds_indexed_range"
+    finally:
+        for part_path in part_paths:
+            try:
+                part_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
 def download_gefs_mean_and_spread(destination_dir: Path, valid_at_utc: datetime) -> GefsBoundarySelection:
     selected_valid_time_utc = floor_to_3h(valid_at_utc)
     run_at_utc, forecast_hour = select_best_run(selected_valid_time_utc)
@@ -153,10 +234,9 @@ def download_gefs_mean_and_spread(destination_dir: Path, valid_at_utc: datetime)
     mean_files: dict[str, str] = {}
     spread_files: dict[str, str] = {}
     for product, bucket in (("geavg", mean_files), ("gespr", spread_files)):
-        url = build_gefs_url(product, run_at_utc, forecast_hour)
         destination = output_dir / build_gefs_filename(product, run_at_utc, forecast_hour)
         if not destination.exists():
-            download_url_to_file(url, destination, allow_insecure=env_allows_insecure_ssl())
+            _download_gefs_product(destination, product, run_at_utc, forecast_hour)
         bucket[product] = str(destination)
 
     selection = GefsBoundarySelection(
@@ -169,6 +249,79 @@ def download_gefs_mean_and_spread(destination_dir: Path, valid_at_utc: datetime)
     )
     manifest_path = output_dir / "manifest.json"
     manifest_path.write_text(json.dumps(selection.__dict__, indent=2), encoding="utf-8")
+    return selection
+
+
+def download_gefs_mean_spread_and_members(
+    destination_dir: Path,
+    valid_at_utc: datetime,
+    *,
+    lat: float,
+    lon: float,
+    max_members: int | None = None,
+) -> GefsBoundarySelection:
+    selected_valid_time_utc = floor_to_3h(valid_at_utc)
+    run_at_utc, forecast_hour = select_best_run(selected_valid_time_utc)
+
+    output_dir = destination_dir / "gefs" / run_at_utc.strftime("%Y%m%dT%HZ") / f"F{forecast_hour:03d}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    mean_files: dict[str, str] = {}
+    spread_files: dict[str, str] = {}
+    source_modes: dict[str, str] = {}
+    for product, bucket in (("geavg", mean_files), ("gespr", spread_files)):
+        destination = output_dir / build_gefs_filename(product, run_at_utc, forecast_hour)
+        if destination.exists():
+            source_modes[product] = "local_existing"
+        else:
+            source_modes[product] = _download_gefs_product(destination, product, run_at_utc, forecast_hour)
+        bucket[product] = str(destination)
+
+    products = list(GEFS_MEMBER_PRODUCTS if max_members is None else GEFS_MEMBER_PRODUCTS[: max(0, int(max_members))])
+    member_dir = output_dir / "members"
+    member_dir.mkdir(parents=True, exist_ok=True)
+    member_files: dict[str, str] = {}
+    member_errors: dict[str, str] = {}
+    max_workers = max(1, int(os.environ.get("PONDWIND_GEFS_MEMBER_DOWNLOAD_WORKERS", "3")))
+
+    def download_member(product: str) -> tuple[str, Path | None, str | None]:
+        destination = member_dir / build_gefs_filename(product, run_at_utc, forecast_hour)
+        if destination.exists():
+            return product, destination, None
+        pds_url = build_gefs_pds_url(product, run_at_utc, forecast_hour)
+        try:
+            _download_gefs_indexed_uv_product(destination, pds_url)
+            return product, destination, None
+        except Exception as pds_exc:
+            url = build_gefs_subset_url(product, run_at_utc, forecast_hour, lat=lat, lon=lon)
+            try:
+                download_url_to_file(url, destination, allow_insecure=env_allows_insecure_ssl())
+            except Exception as exc:
+                return product, None, f"pds={pds_exc!r}; nomads={exc!r}"
+            return product, destination, None
+
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(products) or 1)) as executor:
+        futures = [executor.submit(download_member, product) for product in products]
+        for future in as_completed(futures):
+            product, destination, error = future.result()
+            if error is not None:
+                member_errors[product] = error
+            elif destination is not None:
+                member_files[product] = str(destination)
+
+    selection = GefsBoundarySelection(
+        requested_valid_time_utc=valid_at_utc.astimezone(timezone.utc).isoformat(),
+        selected_valid_time_utc=selected_valid_time_utc.isoformat(),
+        run_at_utc=run_at_utc.isoformat(),
+        forecast_hour=forecast_hour,
+        mean_files=mean_files,
+        spread_files=spread_files,
+        member_files=member_files,
+        member_errors=member_errors,
+    )
+    manifest = {**selection.__dict__, "source_modes": source_modes, "member_source_preference": "noaa_pds_indexed_range_then_nomads_filter"}
+    manifest_path = output_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return selection
 
 
@@ -208,19 +361,7 @@ def sample_gefs_mean_and_spread_at_site(mean_path: Path, spread_path: Path, lat:
     spread_u10, _, _, _ = _open_component(spread_path, "u10")
     spread_v10, _, _, _ = _open_component(spread_path, "v10")
 
-    if latitudes.ndim == 1 and longitudes.ndim == 1:
-        longitudes_2d, latitudes_2d = np.meshgrid(longitudes, latitudes)
-    else:
-        latitudes_2d = latitudes
-        longitudes_2d = longitudes
-
-    query_lon = lon
-    if np.nanmax(longitudes_2d) > 180.0 and query_lon < 0.0:
-        query_lon = lon + 360.0
-
-    distance_metric = (latitudes_2d - lat) ** 2 + (longitudes_2d - query_lon) ** 2
-    nearest_flat_index = int(np.argmin(distance_metric))
-    y_index, x_index = np.unravel_index(nearest_flat_index, distance_metric.shape)
+    latitudes_2d, longitudes_2d, y_index, x_index = _nearest_grid_point(latitudes, longitudes, lat, lon)
 
     point_lat = float(latitudes_2d[y_index, x_index])
     point_lon = float(longitudes_2d[y_index, x_index])
@@ -250,3 +391,61 @@ def sample_gefs_mean_and_spread_at_site(mean_path: Path, spread_path: Path, lat:
         "mean_path": str(mean_path),
         "spread_path": str(spread_path),
     }
+
+
+def _nearest_grid_point(
+    latitudes: np.ndarray,
+    longitudes: np.ndarray,
+    lat: float,
+    lon: float,
+) -> tuple[np.ndarray, np.ndarray, int, int]:
+    if latitudes.ndim == 1 and longitudes.ndim == 1:
+        longitudes_2d, latitudes_2d = np.meshgrid(longitudes, latitudes)
+    else:
+        latitudes_2d = latitudes
+        longitudes_2d = longitudes
+
+    query_lon = lon
+    if np.nanmax(longitudes_2d) > 180.0 and query_lon < 0.0:
+        query_lon = lon + 360.0
+
+    distance_metric = (latitudes_2d - lat) ** 2 + (longitudes_2d - query_lon) ** 2
+    nearest_flat_index = int(np.argmin(distance_metric))
+    y_index, x_index = np.unravel_index(nearest_flat_index, distance_metric.shape)
+    return latitudes_2d, longitudes_2d, int(y_index), int(x_index)
+
+
+def sample_gefs_members_at_site(member_files: dict[str, str | Path], lat: float, lon: float) -> list[dict]:
+    members: list[dict] = []
+    for member_id, path_text in sorted(member_files.items()):
+        path = Path(path_text)
+        u10, latitudes, longitudes, valid_time = _open_component(path, "u10")
+        v10, _, _, _ = _open_component(path, "v10")
+        latitudes_2d, longitudes_2d, y_index, x_index = _nearest_grid_point(latitudes, longitudes, lat, lon)
+
+        point_lat = float(latitudes_2d[y_index, x_index])
+        point_lon = float(longitudes_2d[y_index, x_index])
+        if point_lon > 180.0:
+            point_lon -= 360.0
+        u_value = float(u10[y_index, x_index])
+        v_value = float(v10[y_index, x_index])
+        speed_mps = float(math.hypot(u_value, v_value))
+        direction_from_deg = float((270.0 - math.degrees(math.atan2(v_value, u_value))) % 360.0)
+        members.append(
+            {
+                "member_id": member_id,
+                "valid_time_utc": valid_time,
+                "site_lat": lat,
+                "site_lon": lon,
+                "grid_lat": point_lat,
+                "grid_lon": point_lon,
+                "grid_distance_km": _haversine_km(lat, lon, point_lat, point_lon),
+                "grid_indices": {"y": int(y_index), "x": int(x_index)},
+                "u10_mps": u_value,
+                "v10_mps": v_value,
+                "speed_mps": speed_mps,
+                "wind_from_direction_deg": direction_from_deg,
+                "path": str(path),
+            }
+        )
+    return members

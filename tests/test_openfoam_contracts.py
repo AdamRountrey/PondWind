@@ -3,7 +3,9 @@ from __future__ import annotations
 import tempfile
 import unittest
 from unittest.mock import patch
+import inspect
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -176,6 +178,11 @@ class OpenFoamContractTests(unittest.TestCase):
         self.assertEqual(_default_max_horizontal_cells(15.0), 48000)
         self.assertEqual(_default_max_horizontal_cells(10.0), 108000)
 
+    def test_openfoam_parent_timeout_defaults_to_one_hour(self) -> None:
+        signature = inspect.signature(run_openfoam_domain_average)
+
+        self.assertEqual(signature.parameters["timeout_seconds"].default, 3600)
+
     def test_openfoam_missing_runner_is_user_friendly_skip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"PONDWIND_OPENFOAM_RUNNER": ""}, clear=False):
             with self.assertRaises(OpenFoamRunError) as caught:
@@ -196,6 +203,41 @@ class OpenFoamContractTests(unittest.TestCase):
 
         self.assertTrue(availability["available"])
         self.assertEqual(availability["mode"], "custom_runner")
+
+    def test_custom_runner_is_labeled_as_adapter_not_validated_cfd(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            "os.environ",
+            {"PONDWIND_OPENFOAM_RUNNER": "custom-openfoam-runner"},
+            clear=False,
+        ):
+            root = Path(tmp)
+            elevation_tif = root / "terrain.tif"
+            elevation_tif.write_bytes(b"placeholder")
+
+            def fake_run(command: list[str], **kwargs) -> SimpleNamespace:
+                output_args = {
+                    "--speed-output": np.full((2, 2), 5.0, dtype=np.float32),
+                    "--direction-output": np.full((2, 2), 270.0, dtype=np.float32),
+                    "--u-output": np.full((2, 2), -5.0, dtype=np.float32),
+                    "--v-output": np.zeros((2, 2), dtype=np.float32),
+                }
+                for flag, data in output_args.items():
+                    _write_aaigrid(Path(command[command.index(flag) + 1]), data)
+                return SimpleNamespace(stdout="", stderr="")
+
+            with patch("predictweather.openfoam.subprocess.run", side_effect=fake_run):
+                result = run_openfoam_domain_average(
+                    elevation_tif=elevation_tif,
+                    output_dir=root / "openfoam",
+                    wind_speed_mps=5.0,
+                    wind_direction_deg=270.0,
+                    mesh_resolution_m=30.0,
+                )
+
+            self.assertEqual(result["runner_kind"], "custom_runner_no_wsl_summary")
+            self.assertEqual(result["solver_mode"], "custom_wind_grid_adapter")
+            self.assertEqual(result["scientific_label"], "custom_wind_grid_adapter_not_validated_cfd")
+            self.assertFalse(result["is_scientific_cfd_candidate"])
 
 
 if __name__ == "__main__":

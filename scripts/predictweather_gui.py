@@ -121,12 +121,12 @@ class PredictWeatherGui:
         satellite_checks = Frame(form)
         satellite_checks.grid(row=satellite_row, column=1, columnspan=2, sticky=W, pady=(8, 0))
         Checkbutton(satellite_checks, text="RGB", variable=self.satellite_rgb_var).pack(side=LEFT)
-        Checkbutton(satellite_checks, text="SST", variable=self.satellite_sst_var).pack(side=LEFT, padx=(10, 0))
+        Checkbutton(satellite_checks, text="surface temp", variable=self.satellite_sst_var).pack(side=LEFT, padx=(10, 0))
         Checkbutton(satellite_checks, text="chl-a", variable=self.satellite_chla_var).pack(side=LEFT, padx=(10, 0))
         Checkbutton(satellite_checks, text="turbidity", variable=self.satellite_turbidity_var).pack(side=LEFT, padx=(10, 0))
 
         Checkbutton(form, text="Allow insecure SSL", variable=self.allow_insecure_ssl_var).grid(row=output_row + 2, column=1, sticky=W, pady=(8, 0))
-        Checkbutton(form, text="Force ECOSTRESS SST", variable=self.force_ecostress_sst_var).grid(row=output_row + 3, column=1, sticky=W, pady=(6, 0))
+        Checkbutton(form, text="Force ECOSTRESS surface temp", variable=self.force_ecostress_sst_var).grid(row=output_row + 3, column=1, sticky=W, pady=(6, 0))
 
         actions = Frame(container, pady=12)
         actions.pack(fill="x")
@@ -245,7 +245,7 @@ class PredictWeatherGui:
         self._append_log(f"Wind products: {command[6]}\n")
         self._append_log(
             "Satellite products: "
-            f"RGB={command[10]}, SST={command[11]}, chl-a={command[12]}, turbidity={command[13]}\n"
+            f"RGB={command[10]}, surface temp={command[11]}, chl-a={command[12]}, turbidity={command[13]}\n"
         )
         self._append_log(f"Report folder: {command[7]}\n\n")
         self.status_var.set("Running report build...")
