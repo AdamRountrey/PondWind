@@ -2,9 +2,9 @@
     "version":  1,
     "title":  "PondWind Latest Report",
     "site_label":  "barton_pond",
-    "race_time_local":  "2026-05-31T14:00:00-04:00",
-    "published_at_utc":  "2026-05-31T14:50:04.3333646Z",
-    "source_report_folder":  "20260531_1400_barton_pond",
+    "race_time_local":  "2026-06-07T14:00:00-04:00",
+    "published_at_utc":  "2026-06-07T15:05:29.5376494Z",
+    "source_report_folder":  "20260607_1400_barton_pond",
     "products":  [
                      {
                          "title":  "Wind Speed Prediction",
