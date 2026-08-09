@@ -1,10 +1,10 @@
 ﻿{
     "version":  1,
     "title":  "PondWind Latest Report",
-    "site_label":  "barton_pond",
-    "race_time_local":  "2026-07-04T13:00:00-04:00",
-    "published_at_utc":  "2026-07-03T13:41:22.2967719Z",
-    "source_report_folder":  "20260704_1300_barton_pond",
+    "site_label":  "20260809_1400_barton_pond",
+    "race_time_local":  null,
+    "published_at_utc":  "2026-08-09T14:03:36.9186635Z",
+    "source_report_folder":  "20260809_1400_barton_pond",
     "products":  [
                      {
                          "title":  "Wind Speed Prediction",
@@ -61,13 +61,6 @@
                          "image":  "latest/images/satellite_rgb_latest.png",
                          "thumbnail":  "latest/thumbs/satellite_rgb_latest.jpg",
                          "file_name":  "satellite_rgb_latest.png"
-                     },
-                     {
-                         "title":  "Surface Temperature Over Water",
-                         "category":  "Satellite",
-                         "image":  "latest/images/satellite_sst_latest.png",
-                         "thumbnail":  "latest/thumbs/satellite_sst_latest.jpg",
-                         "file_name":  "satellite_sst_latest.png"
                      },
                      {
                          "title":  "Experimental Chlorophyll-a Index",
