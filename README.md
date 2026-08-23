@@ -395,7 +395,7 @@ It will:
 - upload the zip as a workflow artifact
 - attach the zip to GitHub releases for tags that start with `v`
 
-By default, the workflow downloads the official WindNinja 3.12.2 Windows ZIP from the USDA Forest Service WindNinja download page, verifies the archive checksum, stages the runtime, and then packages PondWind.
+By default, the workflow retries the official WindNinja 3.12.2 Windows ZIP from the USDA Forest Service, verifies its pinned checksum, and stages the runtime. If the USDA endpoint is unavailable, it falls back to the checksummed, vetted WindNinja runtime already packaged in the PondWind `v0.2.4` release.
 
 Optional repository configuration:
 

@@ -33,25 +33,56 @@ jobs:
         run: |
           $officialUrl = "https://research.fs.usda.gov/sites/default/files/2026-03/firelab-windninja-3.12.2-win64.zip"
           $officialSha256 = "217AADD90FBFF5ADE25EA3C9422B10122E36FAB935B14FCDEA1C64F1C01AEA66"
-          $archiveUrl = $env:WINDNINJA_ARCHIVE_URL
-          $expectedSha256 = $env:WINDNINJA_ARCHIVE_SHA256
-          if ([string]::IsNullOrWhiteSpace($archiveUrl)) {
-            $archiveUrl = $officialUrl
-            if ([string]::IsNullOrWhiteSpace($expectedSha256)) {
-              $expectedSha256 = $officialSha256
-            }
+          $fallbackUrl = "https://github.com/AdamRountrey/PondWind/releases/download/v0.2.4/PondWind-windows.zip"
+          $fallbackSha256 = "0AE224960C0BBD752F2A26E45AC733C8BA36B882325E48843A87A3B02904198A"
+          $overrideUrl = $env:WINDNINJA_ARCHIVE_URL
+          $overrideSha256 = $env:WINDNINJA_ARCHIVE_SHA256
+          if ([string]::IsNullOrWhiteSpace($overrideUrl)) {
+            $archiveCandidates = @(
+              [PSCustomObject]@{ Name = "official USDA archive"; Url = $officialUrl; Sha256 = $officialSha256 },
+              [PSCustomObject]@{ Name = "v0.2.4 vetted release fallback"; Url = $fallbackUrl; Sha256 = $fallbackSha256 }
+            )
+          } else {
+            $archiveCandidates = @(
+              [PSCustomObject]@{ Name = "repository override"; Url = $overrideUrl; Sha256 = $overrideSha256 }
+            )
           }
           $archivePath = Join-Path $env:RUNNER_TEMP "WindNinjaApp.zip"
           $extractRoot = Join-Path $env:RUNNER_TEMP "windninja-stage"
           $installRoot = Join-Path $env:RUNNER_TEMP "WindNinjaApp"
-          Write-Host "Downloading WindNinja runtime from $archiveUrl"
-          Invoke-WebRequest -Uri $archiveUrl -OutFile $archivePath
-          if (![string]::IsNullOrWhiteSpace($expectedSha256)) {
-            $actualSha256 = (Get-FileHash -Algorithm SHA256 $archivePath).Hash
-            if ($actualSha256 -ne $expectedSha256.ToUpperInvariant()) {
-              throw "WindNinja archive SHA256 mismatch. Expected $expectedSha256 but got $actualSha256."
+          $downloadedArchive = $null
+          $downloadErrors = @()
+          foreach ($candidate in $archiveCandidates) {
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+              try {
+                Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+                Write-Host "Downloading $($candidate.Name), attempt $attempt of 3."
+                Invoke-WebRequest -UseBasicParsing -Uri $candidate.Url -OutFile $archivePath
+                if (![string]::IsNullOrWhiteSpace($candidate.Sha256)) {
+                  $actualSha256 = (Get-FileHash -Algorithm SHA256 $archivePath).Hash
+                  if ($actualSha256 -ne $candidate.Sha256.ToUpperInvariant()) {
+                    throw "WindNinja archive SHA256 mismatch. Expected $($candidate.Sha256) but got $actualSha256."
+                  }
+                }
+                $downloadedArchive = $candidate
+                break
+              } catch {
+                $message = "$($candidate.Name) attempt $attempt failed: $($_.Exception.Message)"
+                $downloadErrors += $message
+                Write-Warning $message
+                if ($attempt -lt 3) {
+                  Start-Sleep -Seconds (3 * $attempt)
+                }
+              }
+            }
+            if ($null -ne $downloadedArchive) {
+              break
             }
           }
+          if ($null -eq $downloadedArchive) {
+            throw "Unable to download a vetted WindNinja runtime archive. $($downloadErrors -join ' | ')"
+          }
+          Write-Host "Using $($downloadedArchive.Name)."
           Expand-Archive -Path $archivePath -DestinationPath $extractRoot -Force
 
           function Find-WindNinjaHome {
