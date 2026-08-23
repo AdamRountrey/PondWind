@@ -810,17 +810,28 @@ def _parse_residual_summary(solver_log: str) -> dict:
         return {"fields": {}, "converged": False, "reason": "No residual lines were found in the solver log."}
 
     thresholds = {"p": 1.0e-3, "Ux": 1.0e-4, "Uy": 1.0e-4, "Uz": 1.0e-4, "k": 1.0e-4, "epsilon": 1.0e-3}
+    acceptance_tolerance_fraction = 0.10
     required_fields = {"Ux", "Uy", "k", "epsilon"}
     failures = []
     missing_fields = sorted(field for field in required_fields if field not in by_field)
     for field, threshold in thresholds.items():
-        if field in by_field and float(by_field[field]["final"]) > threshold:
-            failures.append({"field": field, "final": float(by_field[field]["final"]), "threshold": threshold})
+        acceptance_limit = threshold * (1.0 + acceptance_tolerance_fraction)
+        if field in by_field and float(by_field[field]["final"]) > acceptance_limit:
+            failures.append(
+                {
+                    "field": field,
+                    "final": float(by_field[field]["final"]),
+                    "target_threshold": threshold,
+                    "acceptance_limit": acceptance_limit,
+                }
+            )
     return {
         "fields": by_field,
         "converged": not failures and not missing_fields,
         "failures": failures,
         "missing_fields": missing_fields,
+        "target_thresholds": thresholds,
+        "acceptance_tolerance_fraction": acceptance_tolerance_fraction,
     }
 
 

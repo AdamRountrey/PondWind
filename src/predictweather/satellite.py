@@ -29,6 +29,7 @@ TARGET_MAP_HEIGHT = 1659
 TARGET_LEGEND_WIDTH = 190
 SATELLITE_RENDER_BUFFER_M = 60.0
 MAX_PARALLEL_ASSET_DOWNLOADS = 4
+MIN_RECOMMENDED_TEMPERATURE_PIXELS = 25
 
 
 @dataclass(frozen=True)
@@ -455,6 +456,21 @@ def _validate_min_pixels(label: str, mask: np.ndarray, *, min_pixels: int = 25) 
         raise ValueError(f"{label} has too few usable pixels for requested bbox ({pixel_count} < {min_pixels})")
 
 
+def _temperature_coverage(mask: np.ndarray, *, label: str) -> tuple[int, str]:
+    pixel_count = int(np.count_nonzero(mask))
+    if pixel_count == 0:
+        raise ValueError(f"{label} has no usable pixels for requested bbox")
+    status = "completed" if pixel_count >= MIN_RECOMMENDED_TEMPERATURE_PIXELS else "limited"
+    return pixel_count, status
+
+
+def _temperature_footer(footer_text: str | None, *, status: str, usable_pixels: int) -> str | None:
+    if status != "limited":
+        return footer_text
+    coverage_note = f"limited coverage: {usable_pixels} px"
+    return f"{footer_text} | {coverage_note}" if footer_text else coverage_note
+
+
 def _apply_scale_offset(data: np.ndarray | np.ma.MaskedArray, scale: float, offset: float, nodata: float | None) -> np.ndarray:
     band = _band_to_float(data)
     if nodata is not None and np.isfinite(nodata):
@@ -867,9 +883,15 @@ def derive_landsat_sst(
     fahrenheit = (kelvin - 273.15) * 9.0 / 5.0 + 32.0
     cloud_bits = ((qa_bits >> 1) & 1) | ((qa_bits >> 2) & 1) | ((qa_bits >> 3) & 1) | ((qa_bits >> 4) & 1) | ((qa_bits >> 5) & 1)
     water_mask = valid_qa & (((qa_bits >> 7) & 1) == 1)
-    _validate_min_pixels("Landsat water-classified pixels", water_mask)
+    water_pixel_count, _ = _temperature_coverage(
+        water_mask,
+        label="Landsat water-classified output",
+    )
     sst = np.where((cloud_bits == 0) & water_mask, fahrenheit, np.nan).astype(np.float32)
-    _validate_min_pixels("Landsat surface-temperature-over-water output", np.isfinite(sst))
+    usable_pixel_count, status = _temperature_coverage(
+        np.isfinite(sst),
+        label="Landsat surface-temperature-over-water output",
+    )
 
     _write_single_band_geotiff(output_tif, sst, transform, crs)
     _render_scalar_product(
@@ -887,12 +909,16 @@ def derive_landsat_sst(
             (0.75, (244, 165, 130)),
             (1.00, (200, 45, 45)),
         ],
-        footer_text=footer_text,
+        footer_text=_temperature_footer(footer_text, status=status, usable_pixels=usable_pixel_count),
     )
     return {
         "product": "surface_temperature_over_water",
         "legacy_product": "sst",
         "source": "landsat",
+        "status": status,
+        "water_pixel_count": water_pixel_count,
+        "usable_pixel_count": usable_pixel_count,
+        "min_recommended_pixel_count": MIN_RECOMMENDED_TEMPERATURE_PIXELS,
         "item_bbox": [bbox.min_lon, bbox.min_lat, bbox.max_lon, bbox.max_lat],
         "min_deg_f": float(np.nanmin(sst)),
         "max_deg_f": float(np.nanmax(sst)),
@@ -942,11 +968,17 @@ def derive_ecostress_sst(
         water = _resample_mask_to_match(water, water_transform, water_crs, kelvin.shape, lst_transform, lst_crs)
 
     water_mask = np.isfinite(water) & (water > 0.5)
-    _validate_min_pixels("ECOSTRESS water-classified pixels", water_mask)
+    water_pixel_count, _ = _temperature_coverage(
+        water_mask,
+        label="ECOSTRESS water-classified output",
+    )
     cloud_mask = np.isfinite(cloud) & (cloud > 0.5)
     fahrenheit = (kelvin - 273.15) * 9.0 / 5.0 + 32.0
     sst = np.where(water_mask & ~cloud_mask, fahrenheit, np.nan).astype(np.float32)
-    _validate_min_pixels("ECOSTRESS surface-temperature-over-water output", np.isfinite(sst))
+    usable_pixel_count, status = _temperature_coverage(
+        np.isfinite(sst),
+        label="ECOSTRESS surface-temperature-over-water output",
+    )
 
     _write_single_band_geotiff(output_tif, sst, lst_transform, lst_crs)
     _render_scalar_product(
@@ -964,12 +996,16 @@ def derive_ecostress_sst(
             (0.75, (244, 165, 130)),
             (1.00, (200, 45, 45)),
         ],
-        footer_text=footer_text,
+        footer_text=_temperature_footer(footer_text, status=status, usable_pixels=usable_pixel_count),
     )
     return {
         "product": "surface_temperature_over_water",
         "legacy_product": "sst",
         "source": "ecostress",
+        "status": status,
+        "water_pixel_count": water_pixel_count,
+        "usable_pixel_count": usable_pixel_count,
+        "min_recommended_pixel_count": MIN_RECOMMENDED_TEMPERATURE_PIXELS,
         "item_bbox": [bbox.min_lon, bbox.min_lat, bbox.max_lon, bbox.max_lat],
         "min_deg_f": float(np.nanmin(sst)),
         "max_deg_f": float(np.nanmax(sst)),

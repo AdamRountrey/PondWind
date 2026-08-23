@@ -140,9 +140,9 @@ def _run_report_worker(argv: list[str]) -> int:
         _emit_worker_event("done", message=done_message)
         return 0
     except Exception as exc:
-        error_root = _runtime_project_root()
+        error_root = Path(report_output_dir).expanduser().resolve() if report_output_dir else _runtime_project_root()
         error_root.mkdir(parents=True, exist_ok=True)
-        error_log = error_root / "report_build_error.txt"
+        error_log = error_root / "PondWind_report_build_error.txt"
         if hasattr(exc, "stage") or hasattr(exc, "details") or hasattr(exc, "message"):
             payload = {
                 "stage": getattr(exc, "stage", "report_build"),

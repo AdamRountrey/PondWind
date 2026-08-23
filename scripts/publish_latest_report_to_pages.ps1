@@ -67,16 +67,23 @@ function Resolve-ReportDirectory {
     }
 
     if ([string]::IsNullOrWhiteSpace($ReportsRoot)) {
-        $localAppData = $env:LOCALAPPDATA
-        if ([string]::IsNullOrWhiteSpace($localAppData)) {
-            throw "LOCALAPPDATA is not set. Pass -ReportsRoot or -ReportDir."
+        Add-Type -AssemblyName System.Windows.Forms
+        $folderDialog = New-Object System.Windows.Forms.FolderBrowserDialog
+        $folderDialog.Description = "Select the folder containing your PondWind reports"
+        $documents = [Environment]::GetFolderPath([Environment+SpecialFolder]::MyDocuments)
+        if (![string]::IsNullOrWhiteSpace($documents)) {
+            $folderDialog.SelectedPath = $documents
         }
-        $ReportsRoot = Join-Path $localAppData "PondWind\outputs\reports"
+        if ($folderDialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) {
+            throw "No reports folder was selected."
+        }
+        $ReportsRoot = $folderDialog.SelectedPath
     }
     if (!(Test-Path -LiteralPath $ReportsRoot -PathType Container)) {
         throw "ReportsRoot was not found: $ReportsRoot"
     }
     $latest = Get-ChildItem -LiteralPath $ReportsRoot -Directory |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "report_manifest.json") -PathType Leaf } |
         Sort-Object LastWriteTime -Descending |
         Select-Object -First 1
     if ($null -eq $latest) {

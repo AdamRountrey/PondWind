@@ -110,11 +110,11 @@ python scripts\run_barton_weekly_report.py `
   --report-output-dir C:\Reports\PondWind
 ```
 
-Outputs are written under:
+Without `--report-output-dir`, source checkouts write outputs under:
 
 - `outputs\reports\<report_name>`
 
-If `--report-output-dir` is provided, the report folder is created there instead.
+If `--report-output-dir` is provided, the dated report folder is created there instead. Shared DEM and forecast downloads are retained in a visible `PondWind Working Data` folder beside the reports so later runs can reuse them.
 
 Satellite products are enabled by default. To skip individual satellite products from the CLI:
 
@@ -349,7 +349,7 @@ Each report folder contains:
 python scripts\predictweather_gui.py
 ```
 
-The GUI lets the user choose the report save folder directly.
+The GUI prompts for the report save location every time a build starts. The selected folder contains the dated report folder, its `report_temp` working files, and the shared `PondWind Working Data` download folder. Report files are not stored under `%LOCALAPPDATA%`.
 
 The GUI also lets users:
 
@@ -358,10 +358,6 @@ The GUI also lets users:
 - turn individual satellite products on or off
 - force ECOSTRESS surface-temperature discovery
 - allow insecure SSL only when a local network requires it
-
-If no custom location is chosen, the packaged `.exe` writes reports to:
-
-- `%LOCALAPPDATA%\PondWind\outputs\reports`
 
 ## Build the Windows app
 
@@ -427,7 +423,7 @@ powershell -ExecutionPolicy Bypass -File scripts\publish_latest_report_to_pages.
 
 The script:
 
-- finds the newest report under `%LOCALAPPDATA%\PondWind\outputs\reports`, unless `-ReportDir` is provided
+- prompts for the folder containing PondWind reports, unless `-ReportsRoot` or `-ReportDir` is provided
 - copies only whitelisted final PNG products
 - writes a sanitized `latest\report.json`
 - updates `index.html`, `styles.css`, and `.nojekyll` on the local `gh-pages` worktree
@@ -439,7 +435,7 @@ To publish a specific report:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\publish_latest_report_to_pages.ps1 `
-  -ReportDir "$env:LOCALAPPDATA\PondWind\outputs\reports\20260517_1400_barton_pond"
+  -ReportDir "C:\Reports\PondWind\20260517_1400_barton_pond"
 ```
 
 To test without pushing:

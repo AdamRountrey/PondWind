@@ -24,7 +24,7 @@ from predictweather.runtime import configure_geospatial_runtime
 configure_geospatial_runtime()
 
 from predictweather.boundary import build_model_point_forecast, load_cached_hrdps_manifest_for_valid_time, sample_boundary_wind_at_site, sample_scalar_field_at_site
-from predictweather.config import DATA_RAW_DIR, OUTPUTS_DIR, PROJECT_ROOT as RUNTIME_PROJECT_ROOT, RESOURCE_ROOT as RUNTIME_RESOURCE_ROOT, SiteConfig
+from predictweather.config import DATA_RAW_DIR, OUTPUTS_DIR, RESOURCE_ROOT as RUNTIME_RESOURCE_ROOT, SiteConfig
 from predictweather.ecmwf import download_ecmwf_for_valid_time, sample_ecmwf_point_forecast
 from predictweather.forecast_models import choose_consensus_boundary, model_table_rows
 from predictweather.gefs import (
@@ -407,10 +407,14 @@ def _format_optional_number(value: float | None, suffix: str) -> str:
     return f"{int(round(value))}{suffix}"
 
 
-def _load_fresh_or_cached_hrdps_boundary(site: SiteConfig, target_valid_time_utc: datetime) -> tuple[dict, str]:
+def _load_fresh_or_cached_hrdps_boundary(
+    site: SiteConfig,
+    target_valid_time_utc: datetime,
+    raw_data_dir: Path = DATA_RAW_DIR,
+) -> tuple[dict, str]:
     fresh_error: Exception | None = None
     try:
-        hrdps_selection = download_hrdps_for_valid_time(DATA_RAW_DIR, target_valid_time_utc)
+        hrdps_selection = download_hrdps_for_valid_time(raw_data_dir, target_valid_time_utc)
         boundary = sample_boundary_wind_at_site(
             ugrd_path=Path(hrdps_selection.files["UGRD"]),
             vgrd_path=Path(hrdps_selection.files["VGRD"]),
@@ -422,7 +426,7 @@ def _load_fresh_or_cached_hrdps_boundary(site: SiteConfig, target_valid_time_utc
         fresh_error = exc
 
     try:
-        cached_manifest, cached_manifest_path = load_cached_hrdps_manifest_for_valid_time(DATA_RAW_DIR / "hrdps", target_valid_time_utc)
+        cached_manifest, cached_manifest_path = load_cached_hrdps_manifest_for_valid_time(raw_data_dir / "hrdps", target_valid_time_utc)
         boundary = sample_boundary_wind_at_site(
             ugrd_path=Path(cached_manifest["files"]["UGRD"]),
             vgrd_path=Path(cached_manifest["files"]["VGRD"]),
@@ -437,11 +441,15 @@ def _load_fresh_or_cached_hrdps_boundary(site: SiteConfig, target_valid_time_utc
         raise RuntimeError(message) from cached_exc
 
 
-def _load_fresh_or_cached_gefs_bundle(site: SiteConfig, target_valid_time_utc: datetime) -> tuple[Path, Path, dict[str, Path], str, dict]:
+def _load_fresh_or_cached_gefs_bundle(
+    site: SiteConfig,
+    target_valid_time_utc: datetime,
+    raw_data_dir: Path = DATA_RAW_DIR,
+) -> tuple[Path, Path, dict[str, Path], str, dict]:
     fresh_error: Exception | None = None
     try:
         gefs_selection = download_gefs_mean_spread_and_members(
-            DATA_RAW_DIR,
+            raw_data_dir,
             target_valid_time_utc,
             lat=site.center_lat,
             lon=site.center_lon,
@@ -458,7 +466,7 @@ def _load_fresh_or_cached_gefs_bundle(site: SiteConfig, target_valid_time_utc: d
         fresh_error = exc
 
     try:
-        cached_manifest, cached_manifest_path = load_cached_gefs_manifest_for_valid_time(DATA_RAW_DIR / "gefs", target_valid_time_utc)
+        cached_manifest, cached_manifest_path = load_cached_gefs_manifest_for_valid_time(raw_data_dir / "gefs", target_valid_time_utc)
         member_paths = {
             member_id: Path(path)
             for member_id, path in cached_manifest.get("member_files", {}).items()
@@ -473,9 +481,14 @@ def _load_fresh_or_cached_gefs_bundle(site: SiteConfig, target_valid_time_utc: d
         raise RuntimeError(message) from cached_exc
 
 
-def _load_hrdps_point_forecast(lat: float, lon: float, target_valid_time_utc: datetime) -> dict:
+def _load_hrdps_point_forecast(
+    lat: float,
+    lon: float,
+    target_valid_time_utc: datetime,
+    raw_data_dir: Path = DATA_RAW_DIR,
+) -> dict:
     site = SiteConfig(center_lat=lat, center_lon=lon)
-    boundary, acquisition_mode = _load_fresh_or_cached_hrdps_boundary(site, target_valid_time_utc)
+    boundary, acquisition_mode = _load_fresh_or_cached_hrdps_boundary(site, target_valid_time_utc, raw_data_dir)
     gust_summary = None
     run_at_utc = target_valid_time_utc.isoformat()
     forecast_hour = 0
@@ -491,12 +504,12 @@ def _load_hrdps_point_forecast(lat: float, lon: float, target_valid_time_utc: da
             forecast_hour = int(cached_manifest["forecast_hour"])
             files = dict(cached_manifest["files"])
         else:
-            hrdps_selection = download_hrdps_for_valid_time(DATA_RAW_DIR, target_valid_time_utc)
+            hrdps_selection = download_hrdps_for_valid_time(raw_data_dir, target_valid_time_utc)
             run_at_utc = hrdps_selection.run_at_utc
             forecast_hour = hrdps_selection.forecast_hour
             files = dict(hrdps_selection.files)
         gust_result = try_download_hrdps_variable(
-            DATA_RAW_DIR,
+            raw_data_dir,
             run_at_utc=datetime.fromisoformat(run_at_utc.replace("Z", "+00:00")),
             forecast_hour=forecast_hour,
             variable_names=GUST_VARIABLE_CANDIDATES,
@@ -540,17 +553,22 @@ def _run_ordered_tasks(tasks: list[tuple[str, Callable[[], object]]], *, max_wor
     return [result for result in results if result is not None]
 
 
-def _load_model_point_forecasts(lat: float, lon: float, target_valid_time_utc: datetime) -> tuple[list[dict], dict[str, str]]:
+def _load_model_point_forecasts(
+    lat: float,
+    lon: float,
+    target_valid_time_utc: datetime,
+    raw_data_dir: Path = DATA_RAW_DIR,
+) -> tuple[list[dict], dict[str, str]]:
     errors: dict[str, str] = {}
     forecasts: list[dict] = []
 
     loaders: list[tuple[str, Callable[[], object]]] = [
-        ("hrdps", lambda: _load_hrdps_point_forecast(lat, lon, target_valid_time_utc)),
-        ("hrrr", lambda: sample_hrrr_point_forecast(download_hrrr_for_valid_time(DATA_RAW_DIR, target_valid_time_utc, lat, lon), lat, lon, "fresh_hrrr")),
-        ("gfs", lambda: sample_gfs_point_forecast(download_gfs_for_valid_time(DATA_RAW_DIR, target_valid_time_utc, lat, lon), lat, lon, "fresh_gfs")),
-        ("nam", lambda: sample_nam_point_forecast(download_nam_for_valid_time(DATA_RAW_DIR, target_valid_time_utc, lat, lon), lat, lon, "fresh_nam")),
-        ("icon", lambda: sample_icon_point_forecast(download_icon_for_valid_time(DATA_RAW_DIR, target_valid_time_utc), lat, lon, "fresh_icon")),
-        ("ecmwf", lambda: sample_ecmwf_point_forecast(download_ecmwf_for_valid_time(DATA_RAW_DIR, target_valid_time_utc), lat, lon, "fresh_ecmwf")),
+        ("hrdps", lambda: _load_hrdps_point_forecast(lat, lon, target_valid_time_utc, raw_data_dir)),
+        ("hrrr", lambda: sample_hrrr_point_forecast(download_hrrr_for_valid_time(raw_data_dir, target_valid_time_utc, lat, lon), lat, lon, "fresh_hrrr")),
+        ("gfs", lambda: sample_gfs_point_forecast(download_gfs_for_valid_time(raw_data_dir, target_valid_time_utc, lat, lon), lat, lon, "fresh_gfs")),
+        ("nam", lambda: sample_nam_point_forecast(download_nam_for_valid_time(raw_data_dir, target_valid_time_utc, lat, lon), lat, lon, "fresh_nam")),
+        ("icon", lambda: sample_icon_point_forecast(download_icon_for_valid_time(raw_data_dir, target_valid_time_utc), lat, lon, "fresh_icon")),
+        ("ecmwf", lambda: sample_ecmwf_point_forecast(download_ecmwf_for_valid_time(raw_data_dir, target_valid_time_utc), lat, lon, "fresh_ecmwf")),
     ]
     for loader_name, result, exc in _run_ordered_tasks(loaders, max_workers=_model_download_workers()):
         if exc is not None:
@@ -566,9 +584,10 @@ def _compute_station_skill_adjustments(
     target_valid_time_utc: datetime,
     site_lat: float,
     site_lon: float,
+    raw_data_dir: Path = DATA_RAW_DIR,
     sample_count: int = DEFAULT_SKILL_SAMPLE_COUNT,
 ) -> tuple[dict[str, float], dict]:
-    station_candidates = nearest_station_candidates(DATA_RAW_DIR, site_lat, site_lon)
+    station_candidates = nearest_station_candidates(raw_data_dir, site_lat, site_lon)
     selected_station = None
     selected_station_distance_km = None
     observations = []
@@ -580,7 +599,7 @@ def _compute_station_skill_adjustments(
         distance_km = float(candidate["distance_km"])
         try:
             candidate_observations = recent_same_local_hour_observations(
-                DATA_RAW_DIR,
+                raw_data_dir,
                 station.station_id,
                 target_time_utc=target_valid_time_utc,
                 timezone_name="America/New_York",
@@ -629,7 +648,12 @@ def _compute_station_skill_adjustments(
     sample_records: list[dict] = []
     for observation in observations:
         valid_time_utc = datetime.fromisoformat(observation.report_time_utc.replace("Z", "+00:00"))
-        model_forecasts, model_errors = _load_model_point_forecasts(observation.lat, observation.lon, valid_time_utc)
+        model_forecasts, model_errors = _load_model_point_forecasts(
+            observation.lat,
+            observation.lon,
+            valid_time_utc,
+            raw_data_dir,
+        )
         sample_record = {
             "observation": observation.as_dict(),
             "model_errors": model_errors,
@@ -781,6 +805,10 @@ def _clean_report_outputs(report_dir: Path) -> list[str]:
 
 def _resolve_report_root(report_output_dir: str | Path | None) -> Path:
     if report_output_dir is None:
+        if getattr(sys, "frozen", False):
+            documents = Path.home() / "Documents"
+            visible_root = documents if documents.is_dir() else Path.home()
+            return visible_root / "PondWind Reports"
         return OUTPUTS_DIR / "reports"
     return Path(report_output_dir).expanduser().resolve()
 
@@ -956,7 +984,7 @@ def _download_satellite_inputs(
         candidate_dir = satellite_root / f"landsat_{index:02d}"
         screening_paths = download_selection_assets(candidate, candidate_dir, asset_keys=["qa_pixel"])
         water_pixels = count_landsat_water_pixels(qa_pixel_tif=screening_paths["qa_pixel"], bbox=selection_bbox)
-        if water_pixels >= 25:
+        if water_pixels > 0:
             landsat = candidate
             landsat_paths = download_selection_assets(candidate, candidate_dir)
             landsat_rank = index
@@ -965,7 +993,7 @@ def _download_satellite_inputs(
     if product_options["sst"] and (landsat is None or landsat_paths is None):
         landsat_unavailable_reason = diagnostics_errors.get(
             "landsat_search",
-            "No Landsat surface-temperature scene had enough water pixels for the requested area.",
+            "No Landsat surface-temperature scene contained water pixels for the requested area.",
         )
 
     ecostress = None
@@ -1000,14 +1028,14 @@ def _download_satellite_inputs(
             candidate_dir = satellite_root / f"ecostress_{index:02d}"
             screening_paths = download_cmr_assets(candidate, candidate_dir, asset_keys=["water"])
             water_pixels = count_ecostress_water_pixels(water_tif=screening_paths["water"], bbox=selection_bbox)
-            if water_pixels >= 25:
+            if water_pixels > 0:
                 ecostress = candidate
                 ecostress_paths = download_cmr_assets(candidate, candidate_dir)
                 ecostress_rank = index
                 break
             ecostress_rejections.append({"item_id": candidate.item_id, "rank": index, "water_pixels": water_pixels})
         if require_ecostress and ecostress is None and ecostress_unavailable_reason is None:
-            ecostress_unavailable_reason = "No ECOSTRESS surface-temperature scene had enough water pixels for the requested area."
+            ecostress_unavailable_reason = "No ECOSTRESS surface-temperature scene contained water pixels for the requested area."
     else:
         ecostress_candidates = []
 
@@ -1358,13 +1386,19 @@ def _build_wind_products(
     mesh_resolution_m: float,
     wind_solver: str = "windninja",
     progress_callback: Callable[[int, str], None] | None = None,
+    raw_data_dir: Path = DATA_RAW_DIR,
 ) -> dict:
     if wind_solver not in {"windninja", "openfoam"}:
         raise ValueError(f"Unsupported wind solver: {wind_solver}")
 
     _progress(progress_callback, 20, "Building wind boundary conditions...")
     boundary_target_time_utc = _aligned_boundary_valid_time(race_time_utc)
-    model_forecasts, model_errors = _load_model_point_forecasts(site.center_lat, site.center_lon, boundary_target_time_utc)
+    model_forecasts, model_errors = _load_model_point_forecasts(
+        site.center_lat,
+        site.center_lon,
+        boundary_target_time_utc,
+        raw_data_dir,
+    )
     if not model_forecasts:
         raise RuntimeError(f"No deterministic model forecasts were available for {boundary_target_time_utc.isoformat()}: {model_errors}")
     _progress(progress_callback, 24, "Scoring recent nearby model skill...")
@@ -1372,11 +1406,13 @@ def _build_wind_products(
         target_valid_time_utc=boundary_target_time_utc,
         site_lat=site.center_lat,
         site_lon=site.center_lon,
+        raw_data_dir=raw_data_dir,
     )
 
     gefs_mean_path, gefs_spread_path, gefs_member_paths, gefs_mode, gefs_manifest = _load_fresh_or_cached_gefs_bundle(
         site,
         boundary_target_time_utc,
+        raw_data_dir,
     )
     sampled_gefs = sample_gefs_mean_and_spread_at_site(
         mean_path=gefs_mean_path,
@@ -2349,51 +2385,62 @@ def _build_satellite_products(
         }
 
     sst_selection = None
+    sst_summary = None
+    sst_derivation_errors: list[dict[str, str]] = []
     if not product_options["sst"]:
         sst_summary = _skipped_satellite_summary("surface_temperature_over_water")
     elif ecostress is not None and ecostress_paths is not None:
         ecostress_time = datetime.fromisoformat(ecostress.item_datetime_utc.replace("Z", "+00:00"))
         sst_tif = temp_dir / "satellite_sst_latest.tif"
-        sst_summary = derive_ecostress_sst(
-            lst_tif=ecostress_paths["lst"],
-            cloud_tif=ecostress_paths["cloud"],
-            water_tif=ecostress_paths["water"],
-            bbox=bbox,
-            output_tif=sst_tif,
-            output_png=sst_png,
-            dem_basemap_tif=dem_basemap_tif,
-            footer_text=_footer_timestamp_text(ecostress_time, "surface temp collected"),
-        )
-        sst_selection = {
-            "source": "ecostress",
-            "item_id": ecostress.item_id,
-            "datetime_utc": ecostress.item_datetime_utc,
-            "cloud_cover": None,
-        }
-    elif landsat is not None and landsat_paths is not None:
+        try:
+            sst_summary = derive_ecostress_sst(
+                lst_tif=ecostress_paths["lst"],
+                cloud_tif=ecostress_paths["cloud"],
+                water_tif=ecostress_paths["water"],
+                bbox=bbox,
+                output_tif=sst_tif,
+                output_png=sst_png,
+                dem_basemap_tif=dem_basemap_tif,
+                footer_text=_footer_timestamp_text(ecostress_time, "surface temp collected"),
+            )
+            sst_selection = {
+                "source": "ecostress",
+                "item_id": ecostress.item_id,
+                "datetime_utc": ecostress.item_datetime_utc,
+                "cloud_cover": None,
+            }
+        except Exception as exc:
+            sst_derivation_errors.append({"source": "ecostress", "error": repr(exc)})
+
+    if product_options["sst"] and sst_summary is None and landsat is not None and landsat_paths is not None:
         landsat_time = datetime.fromisoformat(landsat.item_datetime_utc.replace("Z", "+00:00"))
         sst_tif = temp_dir / "satellite_sst_latest.tif"
-        sst_summary = derive_landsat_sst(
-            lwir11_tif=landsat_paths["lwir11"],
-            qa_pixel_tif=landsat_paths["qa_pixel"],
-            bbox=bbox,
-            lwir_scale=landsat.assets["lwir11"].scale,
-            lwir_offset=landsat.assets["lwir11"].offset,
-            lwir_nodata=landsat.assets["lwir11"].nodata,
-            output_tif=sst_tif,
-            output_png=sst_png,
-            dem_basemap_tif=dem_basemap_tif,
-            footer_text=_footer_timestamp_text(landsat_time, "surface temp collected"),
-        )
-        sst_selection = {
-            "source": "landsat",
-            "item_id": landsat.item_id,
-            "datetime_utc": landsat.item_datetime_utc,
-            "cloud_cover": landsat.cloud_cover,
-        }
-    else:
+        try:
+            sst_summary = derive_landsat_sst(
+                lwir11_tif=landsat_paths["lwir11"],
+                qa_pixel_tif=landsat_paths["qa_pixel"],
+                bbox=bbox,
+                lwir_scale=landsat.assets["lwir11"].scale,
+                lwir_offset=landsat.assets["lwir11"].offset,
+                lwir_nodata=landsat.assets["lwir11"].nodata,
+                output_tif=sst_tif,
+                output_png=sst_png,
+                dem_basemap_tif=dem_basemap_tif,
+                footer_text=_footer_timestamp_text(landsat_time, "surface temp collected"),
+            )
+            sst_selection = {
+                "source": "landsat",
+                "item_id": landsat.item_id,
+                "datetime_utc": landsat.item_datetime_utc,
+                "cloud_cover": landsat.cloud_cover,
+            }
+        except Exception as exc:
+            sst_derivation_errors.append({"source": "landsat", "error": repr(exc)})
+
+    if product_options["sst"] and sst_summary is None:
         reason = (
-            selection_diagnostics.get("ecostress_unavailable_reason")
+            (sst_derivation_errors[-1]["error"] if sst_derivation_errors else None)
+            or selection_diagnostics.get("ecostress_unavailable_reason")
             or selection_diagnostics.get("landsat_unavailable_reason")
             or "Insufficient water coverage in the selected area."
         )
@@ -2411,6 +2458,8 @@ def _build_satellite_products(
             "output_png": str(sst_png),
         }
         sst_selection = None
+
+    selection_diagnostics["sst_derivation_errors"] = sst_derivation_errors
 
     return {
         "selected_products": product_options,
@@ -2474,10 +2523,13 @@ def _write_markdown_report(report_dir: Path, race_time_local: datetime, site: Si
             ]
         )
     if satellite_options["sst"]:
+        sst_coverage_note = ""
+        if sst.get("status") == "limited":
+            sst_coverage_note = f" (limited coverage: {sst.get('usable_pixel_count', 0)} usable pixels)"
         satellite_lines.extend(
             [
                 (
-                    f"{sst_selection['source'].upper()} surface-temperature-over-water source: `{sst_selection['item_id']}` at `{sst_selection['datetime_utc']}`"
+                    f"{sst_selection['source'].upper()} surface-temperature-over-water source: `{sst_selection['item_id']}` at `{sst_selection['datetime_utc']}`{sst_coverage_note}"
                     if sst_selection is not None
                     else f"Surface temperature over water: unavailable ({sst.get('reason', 'insufficient water coverage')})"
                 ),
@@ -2633,8 +2685,16 @@ def build_weekly_report(
     removed_previous_outputs = _clean_report_outputs(report_dir)
     temp_dir = report_dir / "report_temp"
     temp_dir.mkdir(parents=True, exist_ok=True)
+    working_data_dir = report_root / "PondWind Working Data"
+    raw_data_dir = working_data_dir / "downloads"
+    raw_data_dir.mkdir(parents=True, exist_ok=True)
     _progress(progress_callback, 8, "Preparing terrain domain...")
-    domain = prepare_site_domain(site=site, working_dir=temp_dir)
+    domain = prepare_site_domain(
+        site=site,
+        working_dir=temp_dir,
+        raw_data_dir=raw_data_dir,
+        processed_data_dir=working_data_dir / "processed",
+    )
     satellite_inputs = _download_satellite_inputs(
         temp_dir,
         race_time_utc,
@@ -2644,7 +2704,18 @@ def build_weekly_report(
         progress_callback=progress_callback,
     )
     landscape_tif, landscape_summary = _prepare_landscape_input(temp_dir, domain, satellite_inputs, progress_callback)
-    wind_summary = _build_wind_products(report_dir, temp_dir, race_time_utc, site, domain, landscape_tif, mesh_resolution, wind_solver, progress_callback)
+    wind_summary = _build_wind_products(
+        report_dir,
+        temp_dir,
+        race_time_utc,
+        site,
+        domain,
+        landscape_tif,
+        mesh_resolution,
+        wind_solver,
+        progress_callback,
+        raw_data_dir,
+    )
     satellite_summary = _build_satellite_products(report_dir, temp_dir, domain, satellite_inputs, progress_callback)
     _progress(progress_callback, 90, "Writing report outputs...")
     report_path = _write_markdown_report(report_dir, race_time_local, site, wind_summary, satellite_summary)
@@ -2665,6 +2736,11 @@ def build_weekly_report(
         "report_dir": str(report_dir),
         "report_root": str(report_root),
         "report_markdown": str(report_path),
+        "working_data": {
+            "directory": str(working_data_dir),
+            "downloads_dir": str(raw_data_dir),
+            "note": "Shared downloads are kept beside the reports so later runs can reuse them.",
+        },
         "domain": {
             "dataset": domain.dataset,
             "bbox": {

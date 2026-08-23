@@ -33,6 +33,11 @@ def _runtime_project_root() -> Path:
     return PROJECT_ROOT
 
 
+def _default_report_output_dir() -> Path:
+    documents = Path.home() / "Documents"
+    return documents if documents.is_dir() else Path.home()
+
+
 def _local_tz() -> ZoneInfo:
     try:
         return ZoneInfo("America/New_York")
@@ -62,7 +67,7 @@ class PredictWeatherGui:
         self.site_label_var = StringVar(value="barton_pond")
         self.mesh_resolution_var = StringVar(value="30")
         self.wind_solver_var = StringVar(value="windninja")
-        self.report_output_dir_var = StringVar(value=str(_runtime_project_root() / "outputs" / "reports"))
+        self.report_output_dir_var = StringVar(value=str(_default_report_output_dir()))
         self.allow_insecure_ssl_var = IntVar(value=0)
         self.force_ecostress_sst_var = IntVar(value=0)
         self.satellite_rgb_var = IntVar(value=1)
@@ -111,10 +116,9 @@ class PredictWeatherGui:
         Label(form, text="openfoam is optional and requires WSL/OpenFOAM 13", anchor="w").grid(row=solver_row, column=2, sticky=W, padx=(10, 0), pady=6)
 
         output_row = solver_row + 1
-        Label(form, text="Report folder", anchor="w", width=16).grid(row=output_row, column=0, sticky=W, padx=(0, 8), pady=6)
-        output_entry = Entry(form, textvariable=self.report_output_dir_var, width=36)
-        output_entry.grid(row=output_row, column=1, sticky=W, pady=6)
-        Button(form, text="Browse...", command=self._choose_report_output_dir, padx=10, pady=2).grid(row=output_row, column=2, sticky=W, pady=6)
+        Label(form, text="Save reports in", anchor="w", width=16).grid(row=output_row, column=0, sticky=W, padx=(0, 8), pady=6)
+        output_entry = Entry(form, textvariable=self.report_output_dir_var, width=58, state="readonly")
+        output_entry.grid(row=output_row, column=1, columnspan=2, sticky=W, pady=6)
 
         satellite_row = output_row + 1
         Label(form, text="Satellite products", anchor="w", width=16).grid(row=satellite_row, column=0, sticky=W, padx=(0, 8), pady=(8, 0))
@@ -161,10 +165,19 @@ class PredictWeatherGui:
         self.log_text.see(END)
 
 
-    def _choose_report_output_dir(self) -> None:
-        selected = filedialog.askdirectory(initialdir=self.report_output_dir_var.get() or str(_runtime_project_root()))
+    def _choose_report_output_dir(self) -> str | None:
+        current = Path(self.report_output_dir_var.get().strip() or _default_report_output_dir())
+        initial_dir = current if current.is_dir() else _default_report_output_dir()
+        selected = filedialog.askdirectory(
+            parent=self.root,
+            title="Choose where PondWind should save the report",
+            initialdir=str(initial_dir),
+            mustexist=True,
+        )
         if selected:
             self.report_output_dir_var.set(selected)
+            return selected
+        return None
 
 
     def _show_error(self, message: str) -> None:
@@ -235,6 +248,12 @@ class PredictWeatherGui:
         if command is None:
             return
 
+        report_output_dir = self._choose_report_output_dir()
+        if report_output_dir is None:
+            self.status_var.set("Report build canceled.")
+            return
+        command[7] = report_output_dir
+
         self.log_text.delete("1.0", END)
         self._append_log("Starting report build...\n\n")
         self._append_log(f"Race time: {command[0]}\n")
@@ -264,9 +283,10 @@ class PredictWeatherGui:
 
 
     def _emit_local_error(self, message: str, log_text: str | None = None) -> None:
-        error_root = _runtime_project_root()
+        configured_output = self.report_output_dir_var.get().strip()
+        error_root = Path(configured_output) if configured_output else _runtime_project_root()
         error_root.mkdir(parents=True, exist_ok=True)
-        error_log = error_root / "report_build_error.txt"
+        error_log = error_root / "PondWind_report_build_error.txt"
         if log_text:
             error_log.write_text(log_text, encoding="utf-8")
         self.output_queue.put(("progress", "0|Report build failed"))
@@ -361,7 +381,7 @@ class PredictWeatherGui:
                     if self.last_report_file is not None:
                         self.last_report_path_var.set(f"Last report: {self.last_report_file}")
                     else:
-                        report_dir = Path(self.report_output_dir_var.get().strip() or str(_runtime_project_root() / "outputs" / "reports"))
+                        report_dir = Path(self.report_output_dir_var.get().strip() or _default_report_output_dir())
                         self.last_report_path_var.set(f"Reports are under: {report_dir}")
                 elif kind == "error":
                     self.status_var.set(payload)
@@ -376,7 +396,7 @@ class PredictWeatherGui:
 
 
     def _show_last_report_folder(self) -> None:
-        reports_dir = Path(self.report_output_dir_var.get().strip() or str(_runtime_project_root() / "outputs" / "reports"))
+        reports_dir = Path(self.report_output_dir_var.get().strip() or _default_report_output_dir())
         self.status_var.set(f"Reports folder: {reports_dir}")
         self.last_report_path_var.set(str(reports_dir))
 

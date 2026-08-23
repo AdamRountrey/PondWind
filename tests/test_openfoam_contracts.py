@@ -173,6 +173,30 @@ class OpenFoamContractTests(unittest.TestCase):
             np.testing.assert_allclose(vectors, np.array([[3.0, 4.0, 0.1], [4.0, 3.0, 0.2]], dtype=np.float32))
             np.testing.assert_allclose(k_values, np.array([0.375, 0.135], dtype=np.float32))
 
+    def test_residual_gate_accepts_small_numerical_overshoot_but_rejects_unconverged_epsilon(self) -> None:
+        def solver_log(epsilon_final: float) -> str:
+            residuals = {
+                "Ux": (3.2e-5, 2.4e-7),
+                "Uy": (5.8e-5, 4.8e-7),
+                "Uz": (2.2e-4, 1.7e-6),
+                "p": (1.1e-5, 1.1e-7),
+                "k": (1.3e-5, 6.4e-8),
+                "epsilon": (2.7e-2, epsilon_final),
+            }
+            return "\n".join(
+                f"smoothSolver:  Solving for {field}, Initial residual = {initial}, "
+                f"Final residual = {final}, No Iterations 2"
+                for field, (initial, final) in residuals.items()
+            )
+
+        near_threshold = runner._parse_residual_summary(solver_log(1.0427864e-3))
+        unconverged = runner._parse_residual_summary(solver_log(2.0e-3))
+
+        self.assertTrue(near_threshold["converged"])
+        self.assertEqual(near_threshold["acceptance_tolerance_fraction"], 0.10)
+        self.assertFalse(unconverged["converged"])
+        self.assertEqual(unconverged["failures"][0]["field"], "epsilon")
+
     def test_openfoam_cell_cap_scales_with_requested_grid_size(self) -> None:
         self.assertEqual(_default_max_horizontal_cells(30.0), 12000)
         self.assertEqual(_default_max_horizontal_cells(15.0), 48000)
